@@ -22,7 +22,7 @@
 
 ---
 
-## 1. 基线与边界（**先看这一节，决定你能不能照抄**）
+## 1. 基线与边界（**先看这一节，决定你能不能照用**）
 
 ### 1.1 基线
 
@@ -64,7 +64,7 @@
 3. **回来之后必须让注意力"看不见"没回来的页**：否则等于假装有上下文 —— 这就是掩码（mask）与
    `kvmem_score` / `mask hidden` 这类**可读日志**存在的原因。
 
-### 2.2 池页数的算术（可直接抄的公式）
+### 2.2 池页数的算术（可直接采用的公式）
 
 ```
 池页数 = 常驻窗口 / 64  +  预填块 / 64  +  余量(8 页)
@@ -301,7 +301,7 @@ INFO  capacity | KV 17,920 tokens, k8v4, explicit | pages 280/4,096 | runtime <X
 ### 8.5 短测（移植后 15 分钟内该做的唯一一件事）
 
 **数数字语料，1000 token 进 / 1000 token 出**：题面 = `1 2 3 … 300` 空格分隔 + 一句"接着往下数、只输出数字"，
-`max_tokens=1000`、`temperature=0`；读数**去引擎控制台抄**这一行：
+`max_tokens=1000`、`temperature=0`；读数**去引擎控制台读**这一行：
 
 ```
 req#1 done | openai-chat | output limit | prompt <N> | output 1000 | cache 0 (0.0%) |
@@ -322,7 +322,7 @@ req#1 done | openai-chat | output limit | prompt <N> | output 1000 | cache 0 (0.
 
 ## 9. 实测读数（口径 + 出处）
 
-> 出处一律写成相对路径，前缀 `p0-20261002/` = `E:\infer-build\p0-20261002\`（本机内部记录目录，不在本仓）。
+> 出处一律写成相对路径，前缀 `p0-20261002/` = `（本机构建根）\p0-20261002\`（本机内部记录目录，不在本仓）。
 > 那些 `.log` 是 **UTF-16LE**，用 `grep`/`Select-String` 读，不要用按字节读的 `read`。
 > 每条都标了**性质**：正控 / 负控 / 红控 / 判别实验 / 未定位。
 
@@ -427,7 +427,7 @@ req#1 done | openai-chat | stop token | prompt 71 | output 46,046 | cache 0 (0.0
 同一次运行的两条结构读数：`raw_k_shadow` 装 16 层、`kv_size=1024`、32.0 MiB（设备侧）；
 `kvmem_index` `blocks=4096`、256.2 MiB。
 
-### 9.6 仪器纪律（判据分类，照抄时要带上）
+### 9.6 仪器纪律（判据分类，照用时要带上）
 
 - `NEEDLE-PAGE-HIDDEN lines`（如 812/1232、448/812）**只是区间启发式**：按 `∈[first_hidden, last_hidden]`
   计数，而隐藏页允许有洞 ⇒ **既不充分也不必要，不许单用它下结论**。
@@ -553,7 +553,7 @@ req#1 done | openai-chat | stop token | prompt 71 | output 46,046 | cache 0 (0.0
 有版本记录的：spdlog `v1.17.0` · xgrammar `v0.2.7` · dlpack / ggml-quants / llama-jinja 各记来源 commit；
 **cpp-httplib / nlohmann / utf8proc / picojson 树内无版本记录 ⇒ 未核**。
 
-### 12.4 运行时二进制（**不在本仓**，随"内测包"分发时才出现）
+### 12.4 运行时二进制（**不在本仓**，随"分发包"分发时才出现）
 
 | 二进制 | 许可类型 | 许可原文是否随包 |
 |---|---|---|
@@ -563,7 +563,7 @@ req#1 done | openai-chat | stop token | prompt 71 | output 46,046 | cache 0 (0.0
 | `ninfer-serve-{86,89,120a}.exe` | Apache-2.0（本引擎构建产物） | 随包 |
 
 ⚠️ **口径更正（2026-10-02 复核）**：旧文档把 FFmpeg 写成"LGPL/GPL（随构建）"，**以 GPL 为准**；
-旧文档又称"许可原文随包"，实际内测包**没有 `licenses\` 目录** —— 上表三条"未随包"是**已知待办**，
+旧文档又称"许可原文随包"，实际分发包**没有 `licenses\` 目录** —— 上表三条"未随包"是**已知待办**，
 对外分发二进制前应补回许可文本或改写声明。逐条见 `NOTICE.md` §6–§7。
 
 ### 12.5 模型权重归属（本仓**不含**权重）

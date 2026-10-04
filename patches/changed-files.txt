@@ -1,6 +1,6 @@
 # 与上游基线逐文件对账（SHA256，2026-10-03 生成，可由 verify/reconcile-vs-upstream.ps1 复算）
-# 基线 E:\infer-build\refs\infer-all-full\ninfer-all-master
-# 本树 E:\modelscope-publish\repo-v3-20261003\src-tree\fusion-engine-src
+# 基线 （本机构建根）\refs\infer-all-full\ninfer-all-master
+# 本树 （本机发布暂存）\repo-v3-20261003\src-tree\fusion-engine-src
 # identical=2327  modified=92  added=44  missing=0
 
 ## 我方修改（92 件）
