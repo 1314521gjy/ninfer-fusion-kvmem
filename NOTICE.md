@@ -7,6 +7,8 @@
 
 ## 1. 基座与来源（Third-party）
 
+**关系定义**：本仓是上游 NInfer 的**下游衍生**（downstream derivative）——以 `ashalliants/ninfer-3090` 的 `master`（`VERSION = 0.11.0-rtx3090`）为基线，在其上做融合与改动，**不是上游官方仓**。
+
 **上游出处（2026-10-04 已核实，GitHub API 读 `license.spdx_id`）**
 
 | 仓 | 角色 | 默认分支 | 许可 |
