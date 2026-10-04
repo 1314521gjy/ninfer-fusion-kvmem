@@ -1,0 +1,10 @@
+#include "runtime/engine/device_profiles_builtin.h"
+
+namespace ninfer::runtime {
+
+// Generated from src/runtime/engine/device_profiles.json at configure time.
+std::string_view compiled_device_route_profiles_json() {
+    return R"ninfer_json(@NINFER_DEVICE_PROFILES_JSON@)ninfer_json";
+}
+
+} // namespace ninfer::runtime

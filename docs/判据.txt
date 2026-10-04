@@ -1,0 +1,76 @@
+============================================================================
+ 判据.txt  --  小显存长上下文档（ring + host-backed 前缀复用）  端口 8090
+ 口径：本文件里每条读数都注明出处；没跑过的写"未验"。
+============================================================================
+
+[1] 就绪判据（唯一入口：双击 start-8090.bat）
+----------------------------------------------------------------------------
+  A. 引擎日志出现：listening on http://127.0.0.1:8090 | model qwen3.8-27b
+  B. 然后：curl.exe -s -o NUL -w "%%{http_code}" http://127.0.0.1:8090/v1/models
+     期望：200（实测自启动到可服务约 5 秒）
+  ⚠ 端口在监听 != 可服务（坑表 §5.125）。判"可用"只看 B 的 200 或一次真请求成功。
+
+[2] 期望的启动日志（逐字，取自 2026-09-30 实测臂 A2A3-auto-pool-default-chunk）
+----------------------------------------------------------------------------
+  INFO  engine | device profile nvidia-geforce-rtx-4080-super-sm89: 49 routed keys (...)
+  INFO  loading weights | 7.28 GiB
+  [ninfer] reuse host-backed: on                    <- 复用门控确实打开（没这行 = 没生效）
+  INFO  capacity | KV 9,728 tokens, k8v4, auto | pages 152/152 | runtime 1.46 GiB | free 22.5 GiB
+  （2026-09-30 起本档默认 KV 档 = **k8v4**；fp8 时代的同一行是
+    "KV 9,728 tokens, fp8, auto | pages 152/152 | runtime 1.54 GiB" —— 保留作历史，别当成现在的期望值。
+    换档原因见 `03-基础部署后的调优方案.md` §7。）
+  INFO  context cache | 1 active + 1 cached device states | host 8 states, 4.00 GiB KV | private 2 | shared 4 | anchors 2
+  INFO  listening on http://127.0.0.1:8090 | model qwen3.8-27b | auth disabled
+
+  说明：pages 152 = 常驻窗口 128 页(8192 token) + 一个 prefill 块 16 页(1024 token) + slack 8。
+        这就是"池按工作集定"，不是"按剩余显存定"。
+
+[3] 期望的复用自证（同一会话第二问）
+----------------------------------------------------------------------------
+  第一问（40056 token 提示，冷）：
+  INFO  req#1 done | ... | prompt 40,056 | cache 0 (0.0%) | TTFT 19.4s | total 19.6s
+  第二问（同一会话追问）：
+  INFO  req#2 done | ... | prompt 40,097 | cache 40,068 (99.9%, private endpoint) | TTFT 121 ms | total 201 ms
+  引擎侧自证行：
+  [ninfer] adopt host-backed: frontier=40068 need=627 usable=152 host_backed=483
+  ⇒ "need=627 usable=152" 就是"前缀 627 页、设备池只有 152 页"，而它**照常复用**——这是本档的全部意义。
+  ⚠ 判据要认对：门控关掉时第二问仍是 200 且答案正确，**红的是 cache% 与 adopt 计数**（cache 0.0% / adopt=0），
+    不是 HTTP 状态码（坑表 §5.141）。
+
+[4] 常见故障与处方
+----------------------------------------------------------------------------
+  FATAL ... NINFER_KV_WINDOW (KVMem ring) needs a Host KV tier that can hold every page the
+        Device pool cannot: host_pages=.. pool_pages=.. logical_pages=.. (raise --host-kv-mib)
+    ⇒ 主机层装不下被换出的页。按消息里的数字抬高 --host-kv-mib（本档 4096 MiB 起）。
+      公式：host 页数 >= 逻辑页数 - 池页数；逻辑页数 = ceil(max-context / 64)。
+
+  FATAL ... NINFER_KV_WINDOW (KVMem ring) requires --max-concurrency 1
+    ⇒ 本档必须单路（环只能服务一条活跃序列）。不要抬高 --max-concurrency。
+
+  ERROR worker crash: Paged KV reservation invariant was violated
+    ⇒ 本档在设计上不该出现（守卫 + 惰性领用已封）。若出现，请把整份引擎日志发回，
+      并注明 host-kv-mib / max-context / kv-capacity 三个值。
+
+  进程起不来、退出码 0xC0000135
+    ⇒ 缺 CUDA 运行库。引擎通常走驱动侧运行时；必要时设 CUDA_BIN 指向 CUDA 的 bin 或 bin\x64。
+
+  unknown argument: --disk-cache
+    ⇒ 本档引擎（v1.0.8 系）没有磁盘缓存参数，**不要加**（加了直接起不来）。
+
+[5] 边界与未验（不许当"已验"读）
+----------------------------------------------------------------------------
+  * 只发 sm_89（RTX 40 系）；本包不含 sm_120 引擎，其它架构会被启动件直接拒绝。
+  * **单路**：--max-concurrency > 1 会被硬拒。
+  * **文本已验；视觉未验**（三元 v3 制品自带视觉塔，但本档所有实测臂都是纯文本）。
+  * "行空洞 vs 注意力可见性"的**逐页 trace 未做**（复用的正确性目前由针测两轮命中间接证明）。
+  * 小池下的解码吞吐 86-150 tok/s（单跑，n=1，未取交替中位数）；池 = 前缀时约 130-150 tok/s。
+  * 磁盘层（--disk-kv-*）**零实测**；>原生窗口（262144）**未验**且已裁决不做。
+  * `publish host-backed` 是**无条件**行为（复用门控只管"采纳"不管"发布"）：关掉门控时日志里
+    仍会出现 publish host-backed，但没有任何请求会去采纳（坑表 §5.141）。
+
+[6] 实测读数出处
+----------------------------------------------------------------------------
+  fusion-master\WORKLOG-exec.md「11:38-11:45 · 路线③…实现并验收」与「11:46-11:52」两节；
+  臂目录：needle\A2A3-auto-pool-default-chunk、needle\R-route3-repro（独立复现）、
+          needle\S3b3-regression-explicit40960-route3（池 >= 前缀对照）、
+          needle\R-route3-red-clean（门控关红臂）。
