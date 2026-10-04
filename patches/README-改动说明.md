@@ -8,10 +8,10 @@
 
 | 项 | 值 |
 |---|---|
-| 上游 | **`iamwavecut` 的 NInfer-all**（本机存档目录名 `upstream-iamwavecut-ninfer-3090-0.11.0-rtx3090`）|
+| 上游 | **NInfer** —— 原始仓 [`Neroued/ninfer`](https://github.com/Neroued/ninfer)（`master`，Apache-2.0）；基线分支同 [`ashalliants/ninfer-3090`](https://github.com/ashalliants/ninfer-3090) 的 `master`（本机存档目录名 `upstream-iamwavecut-ninfer-3090-0.11.0-rtx3090`）|
 | 版本 | **`VERSION = 0.11.0-rtx3090`** |
 | 本机完整快照 | `refs\infer-all-full\ninfer-all-master\`（2,455 件 / 71.9 MB；排除 `__pycache__` 后 2,419 件）|
-| 上游 URL | ⚠️ **未核**（发布前请确认上游仓的公开地址与分支；我们只按目录名与 `VERSION` 认门）|
+| 上游 URL | ✅ **已核实（2026-10-04）**：<https://github.com/Neroued/ninfer>（原始）· <https://github.com/ashalliants/ninfer-3090>（基线，`master`）· <https://github.com/iamwavecut/ninfer-3090>（存档对应，`master`）|
 
 **我们的工作树**：本仓 `src-tree/fusion-engine-src/`（本机同源工作树 `fusion-master\src\`，2,463 件，排除 `__pycache__`）。本目录下的 `changed-files\` 就是工作树里那批改动文件的**完整副本**，
 路径与工作树一一对应 —— 直接把文件覆盖到你的上游树同名路径即可。

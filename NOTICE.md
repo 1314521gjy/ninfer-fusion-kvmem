@@ -7,6 +7,19 @@
 
 ## 1. 基座与来源（Third-party）
 
+**上游出处（2026-10-04 已核实，GitHub API 读 `license.spdx_id`）**
+
+| 仓 | 角色 | 默认分支 | 许可 |
+|---|---|---|---|
+| [`Neroued/ninfer`](https://github.com/Neroued/ninfer) | NInfer 原始仓 | `master` | **Apache-2.0** |
+| [`ashalliants/ninfer-3090`](https://github.com/ashalliants/ninfer-3090) | 引擎树 README 自称的基线（`master`） | `master` | **Apache-2.0** |
+| [`iamwavecut/ninfer-3090`](https://github.com/iamwavecut/ninfer-3090) | 本机存档目录名对应的仓（`VERSION = 0.11.0-rtx3090`） | `master` | **Apache-2.0** |
+| [`tancau/ninfer-kvmem-ring`](https://github.com/tancau/ninfer-kvmem-ring) | 环的原始线（第三方，见 §2.1） | `main` | **Apache-2.0** |
+| [`kvmem/kvmem-qw3`](https://github.com/kvmem/kvmem-qw3) | 策略层（第三方，作者 Di Chai，源码随树） | `main` | **Apache-2.0** |
+
+> **关于逐文件版权头**：上游 NInfer 的源文件**本身不带逐文件 `Copyright` 行**（实测：整棵树仅 1 个文件含该行），署名以**树根 `LICENSE`** 与各 `third_party/*/LICENSE` 为准 —— 这不是我们抹掉了版权头，特此说明以免误会。
+
+
 | 组件 | 在本仓里的形态 | 许可 | 证据 / 出处 |
 |---|---|---|---|
 | **NInfer**（引擎基座） | `patches/changed-files/` 是针对它写的改动 | **Apache-2.0** | 上游树内 `src/LICENSE`（11,357 B，与 [LICENSE](LICENSE) 同源）|
@@ -69,12 +82,13 @@ git diff --no-index --stat "<上游树>" "<你的树>"
 - **研究与工程记录**：所有读数都带口径（见 `docs/00`），**未验项逐条列出**（见 `README.md` §5 与 `docs/05`），不隐藏。
 - 所有"来源"标注都指向**可复核的凭据**（许可原文或文件路径）；拿不出凭据的，一律写"**未核**"，不含糊。
 - **尊重原作**：模型权重版权归其各自作者与上游（Qwen 体系等）所有，按其各自许可发布；本仓只做**引擎侧适配与工具**。
+- **逐文件版权头**：上游源文件本身不带 `Copyright` 行（实测全树仅 1 个文件含该行），署名以树根 `LICENSE` 与各 `third_party/*/LICENSE` 为准；本仓未删改任何上游版权信息。
 
 ---
 
 ## 4. 未核 / 待办（诚实清单）
 
-1. ⚠️ **上游仓的公开 URL 未核** —— 我们按目录名与 `VERSION` 认门（`iamwavecut` / NInfer-all / `0.11.0-rtx3090`）；发布前应确认确切地址与分支。
+1. ✅ **上游仓的公开 URL 已于 2026-10-04 核实**（`Neroued/ninfer` · `ashalliants/ninfer-3090` · `iamwavecut/ninfer-3090`，分支见 §2 的上游出处表；三者均为 Apache-2.0）。
 2. **`CraneBW` / `laamaafung` 线：仅语义参照，未并入其代码** —— `kvmem_resident_pages` 的定池做法与其同向（出处注释随源码，见 §2.1），两边**没有代码交换** ⇒ 不构成再分发，**不触发其许可义务**（不需要取得其许可原文）。将来若并入其代码，才需先取得并随仓附许可。
 3. ⚠️ **本仓未含构建产物**，因此"照本仓能编出可用二进制"这件事**未在别人的工具链上验过**。
 
@@ -146,7 +160,7 @@ git diff --no-index --stat "<上游树>" "<你的树>"
 
 ---
 
-## 7. 运行时二进制（**不在本仓**；随"内测包"分发时才出现）
+## 7. 运行时二进制（**不在本仓**；通过 GitHub Release 发布，模型权重仍不发布）
 
 | 二进制 | 许可类型 | 许可原文是否随包 |
 |---|---|---|
