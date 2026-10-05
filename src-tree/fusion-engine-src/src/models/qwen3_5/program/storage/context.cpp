@@ -562,11 +562,13 @@ detail::PhysicalResources ProgramImpl::physical_occupancy() const noexcept {
         // held. Counting it made the Device look permanently oversubscribed
         // (allocated 1500 + reserved 938 = 2438 over a 1500-page pool) and drove the
         // capture/materialization paths into a state they could not fund.
-        out.device.main_kv_pages = pool.allocated_pages();
+        out.device.main_kv_pages = pool.allocated_pages() +
+                                  (ring_requested() ? 0U : pool.reserved_pages());
     }
     if (backend_kv_pages) {
         const DeviceKVPagePool& pool = backend_kv_pages->physical_pool();
-        out.device.backend_kv_pages = pool.allocated_pages();
+        out.device.backend_kv_pages = pool.allocated_pages() +
+                                     (ring_requested() ? 0U : pool.reserved_pages());
     }
     if (host_kv_arena) { out.host.kv_bytes = host_kv_arena->occupied_bytes(); }
     return out;
@@ -579,6 +581,7 @@ ProgramImpl::materialization_deficit(const ResourceCandidateState& admission) co
     const detail::PhysicalResources required =
         checked_resource_sum(physical_occupancy(), admission.demand.physical_peak_additional);
     const detail::PhysicalResources limits = admission_capacity();
+    if (!ring_requested()) { return positive_resource_difference(required, limits); }
     // LOCAL PROTOTYPE (KVMem-style ring): a logical Main KV entitlement larger than the pool is
     // not a real deficit; the ring recycles resident pages. Clamp before measuring pressure.
     detail::PhysicalResources clamped = required;
@@ -603,6 +606,7 @@ ProgramImpl::guided_materialization_deficit(const ResourceCandidateState& admiss
     const detail::PhysicalResources required =
         checked_resource_sum(physical_occupancy(), projected_peak);
     const detail::PhysicalResources limits = admission_capacity();
+    if (!ring_requested()) { return positive_resource_difference(required, limits); }
     // LOCAL PROTOTYPE (KVMem-style ring): see materialization_deficit.
     detail::PhysicalResources clamped = required;
     if (clamped.device.main_kv_pages > limits.device.main_kv_pages) {
@@ -633,7 +637,7 @@ bool ProgramImpl::physical_peak_fits(detail::PhysicalResources peak) const noexc
     // logical mapped count, legitimately above pool capacity by design (1660 mapped vs 1500
     // pool observed), so `used <= capacity` fails every capture past the pool even with
     // zero added. Skip the whole dimension as the comment intends, not just the added term.
-    const bool ring = text_kv_pages != nullptr && text_kv_addresses != nullptr &&
+    const bool ring = ring_requested() && text_kv_pages != nullptr && text_kv_addresses != nullptr &&
                       text_kv_pages->physical_pool().usable_pages() <
                           text_kv_addresses->logical_page_capacity();
     const bool ok =
