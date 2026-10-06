@@ -1,5 +1,5 @@
 # local caches / build output
-.ms_upload_cache/
+.ms_upload_cache
 __pycache__/
 *.pyc
 build*/
