@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <variant>
 #include <cmath>
@@ -562,11 +563,13 @@ detail::PhysicalResources ProgramImpl::physical_occupancy() const noexcept {
         // held. Counting it made the Device look permanently oversubscribed
         // (allocated 1500 + reserved 938 = 2438 over a 1500-page pool) and drove the
         // capture/materialization paths into a state they could not fund.
-        out.device.main_kv_pages = pool.allocated_pages();
+        out.device.main_kv_pages = pool.allocated_pages() +
+                                  (ring_requested() ? 0U : pool.reserved_pages());
     }
     if (backend_kv_pages) {
         const DeviceKVPagePool& pool = backend_kv_pages->physical_pool();
-        out.device.backend_kv_pages = pool.allocated_pages();
+        out.device.backend_kv_pages = pool.allocated_pages() +
+                                     (ring_requested() ? 0U : pool.reserved_pages());
     }
     if (host_kv_arena) { out.host.kv_bytes = host_kv_arena->occupied_bytes(); }
     return out;
@@ -579,6 +582,7 @@ ProgramImpl::materialization_deficit(const ResourceCandidateState& admission) co
     const detail::PhysicalResources required =
         checked_resource_sum(physical_occupancy(), admission.demand.physical_peak_additional);
     const detail::PhysicalResources limits = admission_capacity();
+    if (!ring_requested()) { return positive_resource_difference(required, limits); }
     // LOCAL PROTOTYPE (KVMem-style ring): a logical Main KV entitlement larger than the pool is
     // not a real deficit; the ring recycles resident pages. Clamp before measuring pressure.
     detail::PhysicalResources clamped = required;
@@ -603,6 +607,7 @@ ProgramImpl::guided_materialization_deficit(const ResourceCandidateState& admiss
     const detail::PhysicalResources required =
         checked_resource_sum(physical_occupancy(), projected_peak);
     const detail::PhysicalResources limits = admission_capacity();
+    if (!ring_requested()) { return positive_resource_difference(required, limits); }
     // LOCAL PROTOTYPE (KVMem-style ring): see materialization_deficit.
     detail::PhysicalResources clamped = required;
     if (clamped.device.main_kv_pages > limits.device.main_kv_pages) {
@@ -633,7 +638,7 @@ bool ProgramImpl::physical_peak_fits(detail::PhysicalResources peak) const noexc
     // logical mapped count, legitimately above pool capacity by design (1660 mapped vs 1500
     // pool observed), so `used <= capacity` fails every capture past the pool even with
     // zero added. Skip the whole dimension as the comment intends, not just the added term.
-    const bool ring = text_kv_pages != nullptr && text_kv_addresses != nullptr &&
+    const bool ring = ring_requested() && text_kv_pages != nullptr && text_kv_addresses != nullptr &&
                       text_kv_pages->physical_pool().usable_pages() <
                           text_kv_addresses->logical_page_capacity();
     const bool ok =
@@ -1642,6 +1647,65 @@ ProgramImpl::restore_kv_pages_from_host(KVAddressSpaceStore& addresses, LogicalK
     return resident;
 }
 
+// LOCAL FIX (D-5 seam completeness, 2026-10-04): visibility is PAGE granularity, so evidence that
+// straddles a page boundary is cut in half -- and the measured failure mode at a small pool is exactly
+// that: the model answers with a TRUNCATED needle (`ZX-7001` -> `ZX-700`, `ARCH-4201` -> `ARCH-420`,
+// 4/4 deterministic in the ledger's D-5 note; the pool-4000 multi-needle arm loses turn 2 on 4 of 6
+// trials precisely because the needle's own page was brought back without its neighbour).
+//
+// That is what "a small window cannot hold a big question" looks like once it is measured: it is not
+// that 63 pages cannot hold one needle -- it is that the resident set holds HALF of it. The cure does
+// not need a bigger pool, it needs complete evidence for the pages the scorer picked.
+//
+// Policy: walk the ranked pages best-first and complete each one's neighbourhood while the budget
+// lasts. Breadth is traded for completeness on purpose: 31 isolated pages become ~10 fully covered
+// ones, and a needle needs 3 of them at most (its page plus the two the seam can be on). The budget
+// stays the hard cap, so this never asks the ring to hold more than it already did.
+std::vector<std::uint32_t> add_seam_neighbors(std::vector<std::uint32_t> ranked,
+                                              std::uint32_t begin, std::uint32_t end,
+                                              std::uint32_t budget, std::uint32_t reach) {
+    std::vector<std::uint32_t> out;
+    if (reach == 0 || budget == 0 || ranked.empty()) { return ranked; }
+    out.reserve(ranked.size() + 2U * reach * ranked.size());
+    const auto contains = [](const std::vector<std::uint32_t>& pages, std::uint32_t page) {
+        return std::find(pages.begin(), pages.end(), page) != pages.end();
+    };
+    for (const std::uint32_t page : ranked) {
+        if (page < begin || page >= end) { continue; }
+        if (!contains(out, page)) { out.push_back(page); }
+        for (std::uint32_t step = 1; step <= reach; ++step) {
+            // FORWARD first: the measured symptom is a truncated TAIL ("...->  ZX-700"), and what is
+            // missing sits in the page that follows. Backward is added next, for a needle whose
+            // beginning was the part that fell on the far side of the seam.
+            const std::uint32_t forward = page + step;
+            if (forward < end && !contains(out, forward)) { out.push_back(forward); }
+            if (out.size() >= budget) { break; }
+            const std::uint32_t backward = page >= step ? page - step : 0U;
+            if (page >= step && backward >= begin && !contains(out, backward)) {
+                out.push_back(backward);
+            }
+            if (out.size() >= budget) { break; }
+        }
+        if (out.size() >= budget) { break; }
+    }
+    if (out.size() > budget) { out.resize(budget); }
+    return out;
+}
+
+// How many pages on EITHER side of a selected page are brought back with it.
+//   0 = the shipped behaviour, i.e. this fix's NEGATIVE CONTROL (`NINFER_KV_NEIGHBOR_PAGES=0`)
+//   1 = +-1 page (the default; a 64-token page boundary can only separate two halves)
+//   2 = +-2 pages, only ever if the budget allows it
+std::uint32_t proto_kv_neighbor_pages() {
+    static const std::uint32_t reach = [] {
+        const char* text = std::getenv("NINFER_KV_NEIGHBOR_PAGES");
+        if (text == nullptr) { return 1U; }
+        const long value = std::strtol(text, nullptr, 10);
+        return value <= 0 ? 0U : static_cast<std::uint32_t>(value);
+    }();
+    return reach;
+}
+
 // LOCAL PROTOTYPE (KVMem-style ring retrieval): rank the pages that are (or are about to become)
 // Host-resident by lexical overlap with the recent context, and return the top `budget` page
 // indices. The score is an inverse-document-frequency weighted token overlap, which is what makes
@@ -1686,8 +1750,18 @@ std::vector<std::uint32_t> ProgramImpl::select_retrieval_pages(const SequenceSta
                                                      : left.second < right.second;
                 });
                 if (ranked.size() > budget) { ranked.resize(budget); }
-                selected.reserve(ranked.size());
-                for (const auto& entry : ranked) { selected.push_back(entry.second); }
+                // D-5: complete the evidence of the pages we keep, in score order, while the budget
+                // lasts. The result is re-sorted below because callers binary-search it
+                // (demote_kv_pages_to_host's is_preferred, context.cpp:1871).
+                std::vector<std::uint32_t> by_score;
+                by_score.reserve(ranked.size());
+                for (const auto& entry : ranked) { by_score.push_back(entry.second); }
+                selected = add_seam_neighbors(std::move(by_score), begin, end, budget,
+                                              proto_kv_neighbor_pages());
+                if (selected.empty()) {
+                    selected.reserve(ranked.size());
+                    for (const auto& entry : ranked) { selected.push_back(entry.second); }
+                }
                 std::sort(selected.begin(), selected.end());
                 return selected;
             }
@@ -2213,6 +2287,86 @@ ProgramImpl::retained_device_kv_pages(const SharedPrefixHandle& shared) const no
     } catch (...) { return {}; }
 }
 
+// LOCAL FIX (B01 ring room): this beat used to live inside ensure_sequence_kv_mapped as a local
+// lambda, so the two other places that map Device KV pages without going through it -- the DFlash
+// context append (decode.cpp) and the causal-scoring lane (program_impl.cpp) -- asked the pool for
+// pages without ever demoting, and hit the paged-KV reservation invariant once the pool was full
+// with nothing demotable left. Same logic, one home, callable from every mapping site, with the
+// early verdict inside so no caller can forget it.
+void ProgramImpl::ensure_ring_room(KVAddressSpaceStore& addresses, LogicalKVPageStore& pages,
+                                   const KVAddressSpaceHandle& address, std::uint32_t total_tokens,
+                                   std::span<const std::uint32_t> preferred) {
+    // No-op unless the ring is active: with a pool that covers the logical context every page is
+    // resident anyway, and a demotion pass would be pure overhead on the hot path.
+    if (proto_kv_window_pages() == 0 ||
+        pages.physical_pool().usable_pages() >= addresses.logical_page_capacity()) {
+        return;
+    }
+    // Keep a few pages of slack so the pool never runs at exactly 100%: the restore path always
+    // needs a free Device page to work with.
+    constexpr std::uint32_t kRingSlackPages = 8U;
+    const auto free_pages                   = [](const LogicalKVPageStore& store) {
+        const std::uint32_t usable    = store.physical_pool().usable_pages();
+        const std::uint32_t allocated = store.physical_pool().allocated_pages();
+        return usable > allocated ? usable - allocated : 0U;
+    };
+    const std::uint32_t sink_pages = proto_kv_sink_pages();
+    const std::uint32_t total      = proto_pages_for_tokens(total_tokens);
+    const std::uint32_t mapped     = addresses.mapped_pages(address);
+    const std::uint32_t need       = total > mapped ? total - mapped : 0U;
+    std::uint32_t wanted_extra     = 0;
+    for (const std::uint32_t page : preferred) {
+        const LogicalKVPageHandle logical = addresses.logical_page(address, page);
+        if (pages.valid(logical) && !pages.device_resident(logical) &&
+            pages.host_resident(logical)) {
+            ++wanted_extra;   // a preferred page has to be brought back
+        }
+    }
+    const std::uint32_t want_free   = need + kRingSlackPages + wanted_extra;
+    const std::uint32_t free_now    = free_pages(pages);
+    const std::uint32_t target_free = want_free > free_now ? want_free - free_now : 0U;
+    if (target_free == 0) {
+        (void)demote_kv_pages_to_host(addresses, pages, address, sink_pages, 0U, preferred);
+        return;
+    }
+    // Cold pages first: inactive addresses are pure cache, so drain them before touching this
+    // sequence's own resident window.
+    const std::uint32_t freed_cold =
+        demote_other_addresses_to_host(addresses, pages, address, target_free);
+    const std::uint32_t free_after = free_pages(pages);
+    const std::uint32_t target2 = want_free > free_after ? want_free - free_after : 0U;
+    const std::uint32_t freed_own =
+        demote_kv_pages_to_host(addresses, pages, address, sink_pages, target2, preferred);
+    // LOCAL FIX (B01 ring early verdict): both demotions used to have their return value dropped, so
+    // a ring that could free nothing carried on into `ensure_mapped_to_tokens` and failed later --
+    // as the paged-KV reservation invariant, as an engine death, or (measured 2026-10-04, community
+    // report) as a request that never returns while the prefill loop retries block after block.
+    // Decide HERE, where the numbers are known.
+    // `need` is the hard requirement: pages this step must map. The slack and the preferred restores
+    // are best effort (retrieval quality), so falling short of `want_free` warns instead of failing.
+    const std::uint32_t free_final = free_pages(pages);
+    if (free_final < need) {
+        // ContextCacheExhausted is a std::bad_alloc (include/ninfer/types.h:867), so the worker's
+        // out-of-memory path fails this request and keeps serving -- it is not gated by
+        // --recover-invariant-failures. This is the readable error the task book's F1 asks for
+        // instead of a silent stall or a dead engine.
+        throw ninfer::ContextCacheExhausted(
+            "KVMem ring cannot free Device KV pages: this step needs " + std::to_string(need) +
+            " free, " + std::to_string(free_final) + " available (target " +
+            std::to_string(want_free) + " = need + slack " + std::to_string(kRingSlackPages) +
+            " + restores " + std::to_string(wanted_extra) + "; freed cold " +
+            std::to_string(freed_cold) + ", own " + std::to_string(freed_own) + "; pool usable " +
+            std::to_string(pages.physical_pool().usable_pages()) + ", allocated " +
+            std::to_string(pages.physical_pool().allocated_pages()) + ")");
+    }
+    if (free_final < want_free) {
+        std::fprintf(stderr,
+                     "[ninfer] ring short: freed=%u want=%u need=%u free=%u cold=%u own=%u -> "
+                     "continuing without slack\n",
+                     freed_cold + freed_own, want_free, need, free_final, freed_cold, freed_own);
+    }
+}
+
 void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32_t main_tokens,
                                             std::uint32_t backend_tokens) {
     if (!sequence.kv || main_tokens > capacity || backend_tokens > capacity) {
@@ -2226,7 +2380,8 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
     // silently disable master's own lease-growth behaviour. This port replaces only the MAPPING
     // beat; master's lease accounting is untouched. Kept FIRST because master ran it before any
     // mapping and because the beats below consume what it decides (beat 1 scores over the mapped
-    // range, ring_one computes need = total - mapped, beat 3 maps into the entitlement it sized).
+    // range, ensure_ring_room computes need = total - mapped, beat 3 maps into the entitlement it
+    // sized).
     ensure_sequence_kv_lease(sequence, main_tokens, backend_tokens);
     // LOCAL PROTOTYPE (KVMem-style ring): when a Device pool is smaller than the logical context a
     // sequence cannot keep all of its KV on the Device. Each call then:
@@ -2248,42 +2403,6 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
                           text_kv_addresses->logical_page_capacity();
     std::vector<std::uint32_t> preferred;
     if (ring) {
-        // Keep a few pages of slack so the pool never runs at exactly 100%: the restore path always
-        // needs a free Device page to work with.
-        constexpr std::uint32_t kRingSlackPages = 8U;
-        const auto free_pages = [](const LogicalKVPageStore& store) {
-            const std::uint32_t usable = store.physical_pool().usable_pages();
-            const std::uint32_t allocated = store.physical_pool().allocated_pages();
-            return usable > allocated ? usable - allocated : 0U;
-        };
-        const auto ring_one = [&](KVAddressSpaceStore& addresses, LogicalKVPageStore& pages,
-                                  const KVAddressSpaceHandle& address, std::uint32_t total,
-                                  std::span<const std::uint32_t> prefer) {
-            const std::uint32_t mapped = addresses.mapped_pages(address);
-            const std::uint32_t need   = total > mapped ? total - mapped : 0U;
-            std::uint32_t wanted_extra = 0;
-            for (const std::uint32_t page : prefer) {
-                const LogicalKVPageHandle logical = addresses.logical_page(address, page);
-                if (pages.valid(logical) && !pages.device_resident(logical) &&
-                    pages.host_resident(logical)) {
-                    ++wanted_extra;   // a preferred page has to be brought back
-                }
-            }
-            const std::uint32_t want_free = need + kRingSlackPages + wanted_extra;
-            const std::uint32_t free_now  = free_pages(pages);
-            const std::uint32_t target_free = want_free > free_now ? want_free - free_now : 0U;
-            if (target_free != 0) {
-                // Cold pages first: inactive addresses are pure cache, so drain them before touching
-                // this sequence's own resident window.
-                (void)demote_other_addresses_to_host(addresses, pages, address, target_free);
-                const std::uint32_t free_after = free_pages(pages);
-                const std::uint32_t target2 = want_free > free_after ? want_free - free_after : 0U;
-                (void)demote_kv_pages_to_host(addresses, pages, address, sink_pages, target2,
-                                              prefer);
-            } else {
-                (void)demote_kv_pages_to_host(addresses, pages, address, sink_pages, 0U, prefer);
-            }
-        };
         // Retrieval preference: a share of the pool (default half -- see the LOCAL FIX comment on
         // proto_kv_retrieve_share_percent), scored on the whole mapped range.
         // Scoring runs only when the mapped page count changed (relevance shifts slowly; within one
@@ -2291,6 +2410,32 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         const std::uint32_t pool   = text_kv_pages->physical_pool().usable_pages();
         const std::uint32_t share  = pool * proto_kv_retrieve_share_percent() / 100U;
         const std::uint32_t budget = std::min(proto_kv_retrieve_pages(), share);
+        // ---- P1-a BUDGET LINE (2026-10-05): the pool's split, in one auditable row. --------------
+        // WHY: the plan's P1-a asks for "[ring] budgets: skeleton=S, evidence=E, recent=R, free=F
+        // (pool P)" so that the NEXT person can see where the KV budget went without reading code.
+        // WHAT EACH TERM IS, exactly (no invented quantities):
+        //   skeleton = the attention-sink pin (proto_kv_sink_pages) -- the only region the demotion
+        //              scan refuses to touch (context.cpp:1946/1952). Measured need for a real agent
+        //              surface: 2,808 tokens = 44 pages (see 实验-骨架体量实测-20261005.md).
+        //   evidence = the retrieval budget, min(NINFER_KV_RETRIEVE, pool * SHARE%) -- the pages the
+        //              ring may bring back; it is taken FROM the pool by construction.
+        //   recent   = what is left for the recency window and the sequence's own frontier.
+        //   free     = pool - everything above.
+        // The identity S + E + R + F == P therefore holds BY CONSTRUCTION, which is what makes this
+        // row a self-check rather than decoration: if a reader ever sees the four not summing to the
+        // pool, one of the terms was redefined without updating the others.
+        // Logged once per request (the ring path is per-request), not per chunk, to avoid flooding.
+        {
+            const std::uint32_t b_skeleton = sink_pages < pool ? sink_pages : pool;
+            const std::uint32_t b_evidence = budget < pool - b_skeleton ? budget : pool - b_skeleton;
+            const std::uint32_t b_recent   = 0U;   // recency is whatever the request's own frontier maps
+            const std::uint32_t b_free     = pool - b_skeleton - b_evidence - b_recent;
+            std::fprintf(stderr,
+                         "[ring] budgets: skeleton=%u, evidence=%u, recent=%u, free=%u (pool %u) "
+                         "[skeleton+evidence+recent+free == pool: %s]\n",
+                         b_skeleton, b_evidence, b_recent, b_free, pool,
+                         (b_skeleton + b_evidence + b_recent + b_free) == pool ? "yes" : "NO");
+        }
         const std::uint32_t mapped_now = text_kv_addresses->mapped_pages(sequence.kv->text);
         if (budget != 0 && mapped_now > sink_pages &&
             (mapped_now != sequence.ring_scored_mapped || sequence.ring_keep.empty())) {
@@ -2310,10 +2455,14 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         preferred.erase(std::remove_if(preferred.begin(), preferred.end(),
                                        [&](std::uint32_t page) { return page >= mapped_now; }),
                         preferred.end());
-        ring_one(*text_kv_addresses, *text_kv_pages, sequence.kv->text, text_total, preferred);
+        // B01: room is made by the shared helper, which every mapping site now uses. It takes the
+        // token frontier (proto_pages_for_tokens converts) and decides right here -- with these exact
+        // numbers -- whether the pages this step must map can be freed at all.
+        ensure_ring_room(*text_kv_addresses, *text_kv_pages, sequence.kv->text, main_tokens,
+                         preferred);
         if (has_backend) {
-            ring_one(*backend_kv_addresses, *backend_kv_pages, *sequence.kv->backend, backend_total,
-                     {});
+            ensure_ring_room(*backend_kv_addresses, *backend_kv_pages, *sequence.kv->backend,
+                             backend_tokens, {});
         }
     }
     text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, device.stream);

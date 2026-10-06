@@ -77,6 +77,19 @@ DeviceBinding::DeviceBinding(int device) {
     if (previous_ == device) { return; }
     const cudaError_t set = cudaSetDevice(device);
     if (set != cudaSuccess) {
+        if (set == cudaErrorInsufficientDriver) {
+            // NVIDIA CUDA 13.1 release notes, Table 2: CUDA 13.x needs a driver >= 580, and since
+            // 13.1 the Windows display driver no longer ships with the toolkit -- so an older driver
+            // fails here with a bare "insufficient driver" and no hint that the driver is the cause.
+            // Name the requirement instead of leaving rc=35 unexplained.
+            int driver = 0;
+            (void)cudaDriverGetVersion(&driver);
+            throw std::runtime_error(
+                cuda_error_message("cudaSetDevice failed", set) +
+                " -- this build links CUDA 13.x runtime libraries, which require a driver >= 580 "
+                "(NVIDIA CUDA 13.1 release notes, Table 2). Installed driver reports "
+                + std::to_string(driver) + " (driver versions are reported x1000). Update the driver.");
+        }
         throw std::runtime_error(cuda_error_message("cudaSetDevice failed", set));
     }
     changed_ = true;

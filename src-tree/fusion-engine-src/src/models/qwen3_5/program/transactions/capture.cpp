@@ -810,6 +810,34 @@ bool ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
         active_removed.device.main_kv_pages       = shared.device.main_kv_pages;
         active_removed.device.backend_kv_pages    = shared.device.backend_kv_pages;
         active_removed.host.kv_bytes              = shared.host.kv_bytes;
+        // LOCAL FIX (B01 Class C, snapshot room): `prepare_active_snapshot` reserves its copied tail
+        // pages (kv_store.h:1554-1556) and that reservation IS capacity-checked, but nothing demoted
+        // first -- so a pool holding other residents could refuse a snapshot whose room the ring could
+        // have made by draining the INACTIVE owners (pure cache). Same shape as the restore path's fix
+        // (materialization.cpp:884-887) and as ensure_ring_room: make room, then ask.
+        // Self-gating on purpose: nothing is demoted when the pool can already cover the reservation,
+        // so a configuration that is not short sees no behaviour change at all.
+        const auto drain_other_for = [&](KVAddressSpaceStore& addresses, LogicalKVPageStore& pages,
+                                         const KVAddressSpaceHandle& keep, std::uint32_t room) {
+            if (room == 0) { return; }
+            const auto& pool = pages.physical_pool();
+            const std::uint32_t free_now = pool.usable_pages() > pool.allocated_pages()
+                                               ? pool.usable_pages() - pool.allocated_pages()
+                                               : 0U;
+            if (free_now >= room) { return; }
+            (void)demote_other_addresses_to_host(addresses, pages, keep, room - free_now);
+        };
+        drain_other_for(*text_kv_addresses, *text_kv_pages, sequence.kv->text,
+                        text_kv_addresses->active_snapshot_shape(sequence.kv->text,
+                                                                 sequence.text_kv_valid)
+                            .copied_pages());
+        if (sequence.kv->backend) {
+            drain_other_for(*backend_kv_addresses, *backend_kv_pages, *sequence.kv->backend,
+                            backend_kv_addresses
+                                ->active_snapshot_shape(*sequence.kv->backend,
+                                                        backend_kv_valid(sequence))
+                                .copied_pages());
+        }
         transaction.active_text_destination = text_kv_addresses->create_inactive();
         if (!transaction.active_text_destination) {
             throw std::logic_error("selected capture has no Text KV address descriptor");

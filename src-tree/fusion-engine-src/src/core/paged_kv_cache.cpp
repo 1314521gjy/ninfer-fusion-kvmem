@@ -5,6 +5,7 @@
 #include "ninfer/types.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <limits>
 #include <new>
@@ -423,7 +424,33 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
     }
     if (count == 0) { return; }
     if (count > usable_pages() - allocated_pages_) {
-        throw std::logic_error("Paged KV reservation invariant was violated");
+        // Numbers, not just the verdict: "the pool could not be drained" is only actionable
+        // with the counters beside it. Taken from the superseded diagnostic patch
+        // (patches-master/_superseded/A-paged_kv_cache.cpp.FULL-do-not-apply.patch:145-149).
+        std::fprintf(stderr,
+                     "[diag] materialize-batch FAIL count=%u usable=%u allocated=%u reserved=%u "
+                     "reservation=%u\n",
+                     count, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_);
+        // LOCAL FIX (B01 classification): this test is a CAPACITY condition -- the pool has no free
+        // page for the pages this materialization must place (restore, logical growth, transfer
+        // destination) -- but it used to be thrown as a std::logic_error, i.e. an "internal
+        // invariant", which the worker treats as fatal unless --recover-invariant-failures is on.
+        // That is how a full pool became `worker crash: Paged KV reservation invariant was violated`
+        // -> 500 for the request -> 503 for everything after it (ledger B01; community reports
+        // 2026-10-03/04 -- exactly the string they pasted). ContextCacheExhausted is a std::bad_alloc
+        // (include/ninfer/types.h:867), so the worker's out-of-memory path fails the affected request
+        // -- unconditionally, not gated by that switch -- and keeps serving; the transaction layer's
+        // own ContextCacheExhausted handlers (materialization.cpp) are the ones written for a
+        // capacity failure. The old wording stays in the message so existing triage greps and the
+        // published ledger still match, and the class of the failure is now the correct one.
+        throw ContextCacheExhausted(
+            "Paged KV pool cannot materialize " + std::to_string(count) +
+            " page(s): usable " + std::to_string(usable_pages()) + " (capacity " +
+            std::to_string(capacity_pages()) + ", lent " + std::to_string(lent_pages_) +
+            "), allocated " + std::to_string(allocated_pages_) + ", reserved " +
+            std::to_string(reserved_pages_) + " of which this reservation " +
+            std::to_string(reservation.pages_) +
+            " -- previously reported as \"Paged KV reservation invariant was violated\"");
     }
 
     std::optional<std::int32_t> preferred;
@@ -495,12 +522,31 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
     reservation.pages_ -= count;
 }
 
-DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& reservation) {
+DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& reservation,
+                                                    const char* tag) {
     if (!reservation.belongs_to(*this) || reservation.pages_ == 0) {
         throw std::invalid_argument("Paged KV single-page materialization exceeds reservation");
     }
     if (free_page_runs_.empty()) {
-        throw std::logic_error("Paged KV reservation invariant was violated");
+        // Which caller hit the wall matters as much as the counters: host restore, logical
+        // growth and transfer destinations reach this pool by different paths.
+        std::fprintf(stderr,
+                     "[diag] materialize-one FAIL tag=%s usable=%u allocated=%u reserved=%u "
+                     "reservation=%u\n",
+                     tag, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_);
+        // LOCAL FIX (B01 classification): same as materialize_batch above -- "no free page run left"
+        // is capacity exhaustion, not an internal invariant. ContextCacheExhausted (a std::bad_alloc)
+        // routes it to the worker's out-of-memory path and to the transaction layer's capacity
+        // handlers, so one unaffordable restore fails its own request instead of the Engine. The
+        // `tag` is the caller's name for the site and is the single most useful field here.
+        throw ContextCacheExhausted(
+            std::string("Paged KV pool has no free page for ") +
+            (tag != nullptr ? tag : "an unnamed materialization") + ": usable " +
+            std::to_string(usable_pages()) + " (capacity " + std::to_string(capacity_pages()) +
+            ", lent " + std::to_string(lent_pages_) + "), allocated " +
+            std::to_string(allocated_pages_) + ", reserved " + std::to_string(reserved_pages_) +
+            " of which this reservation " + std::to_string(reservation.pages_) +
+            " -- previously reported as \"Paged KV reservation invariant was violated\"");
     }
     KVPageRun& run        = free_page_runs_.front();
     const std::int32_t page = run.begin++;

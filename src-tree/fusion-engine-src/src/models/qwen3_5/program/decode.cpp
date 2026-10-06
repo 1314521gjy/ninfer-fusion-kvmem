@@ -354,6 +354,12 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
         // coverage, including any uncommitted suffix that survives until the round is settled.
         // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
         if (sequence.kv->backend) {
+            // B01 (Class B: needs Device pages but never made room): this backend-KV grow used to map
+            // straight into the pool, so a full pool with nothing demotable turned the draft cache's
+            // growth into the paged-KV reservation invariant. ensure_ring_room demotes first, and
+            // fails this request with a readable error when it cannot make room at all.
+            ensure_ring_room(*backend_kv_addresses, *backend_kv_pages, *sequence.kv->backend, end,
+                             {});
             backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
                                                           compute_streams);
         }

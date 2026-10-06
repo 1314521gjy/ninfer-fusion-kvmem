@@ -751,6 +751,16 @@ bool ProgramImpl::salvage_continuation(SequenceState& state, RequestControl& req
             state.dflash_context_frontier < frontier) {
             return false;
         }
+        // The same rule for MTP, which the Prefilling branch was missing: publishing a half-finished
+        // prefill as a continuation endpoint makes the next request plan a reuse it cannot
+        // materialize, and every retry re-plans the same way, so the session answers 500 forever
+        // (`published MTP checkpoint is not materializable`). Taken verbatim from the upstream fix,
+        // iamwavecut/ninfer-all PR #4 (merged 2026-10-03, commit 064ca424) -- the Active/Finishable
+        // branch below has carried this guard all along.
+        if (speculative_backend == SpeculativeBackend::Mtp &&
+            (!state.tail_hidden_valid || state.mtp_kv_valid + 1 < frontier)) {
+            return false;
+        }
     } else if (lifecycle == Lifecycle::Active || lifecycle == Lifecycle::Finishable) {
         frontier = state.execution_frontier;
         if (frontier < kSalvageMinFrontier || state.text_kv_valid != frontier) { return false; }

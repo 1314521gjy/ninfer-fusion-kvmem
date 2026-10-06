@@ -287,7 +287,8 @@ public:
                      std::vector<DeviceKVPageLease>& destination,
                      std::optional<DeviceKVPageHandle> preferred_predecessor = std::nullopt);
     // Single-page forms for fixed-capacity logical stores which do not own a growable lease vector.
-    [[nodiscard]] DeviceKVPageLease materialize_one(DeviceKVPageReservation& reservation);
+    [[nodiscard]] DeviceKVPageLease materialize_one(DeviceKVPageReservation& reservation,
+                                                      const char* tag = "unspecified");
     // Returns trailing leases to the same entitlement instead of releasing their capacity.
     void dematerialize(DeviceKVPageReservation& reservation, std::uint32_t target_page_count,
                        std::vector<DeviceKVPageLease>& source);

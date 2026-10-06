@@ -1601,6 +1601,18 @@ private:
     void unbind_sequence_kv(SequenceState& sequence) noexcept;
     void ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32_t main_tokens,
                                    std::uint32_t backend_tokens = 0);
+    // LOCAL FIX (B01 ring room): the ring's "make room before mapping" beat, callable from every
+    // mapping site. It demotes inactive addresses first and then this address's own pages, and fails
+    // the request with a readable error (ContextCacheExhausted, a std::bad_alloc, so the worker's
+    // out-of-memory path fails just this request) when the pages this step must map cannot be freed.
+    // Self-guarding: a no-op unless the ring is active (a Device pool smaller than the logical
+    // context with a window configured). `total_tokens` is the frontier to be mapped, in tokens.
+    // Call this before ensure_mapped_to_tokens from any path that does not go through
+    // ensure_sequence_kv_mapped -- that bypass is what let the DFlash context append and the
+    // causal-scoring lane ask a full pool for pages with nothing left to demote.
+    void ensure_ring_room(KVAddressSpaceStore& addresses, LogicalKVPageStore& pages,
+                          const KVAddressSpaceHandle& address, std::uint32_t total_tokens,
+                          std::span<const std::uint32_t> preferred);
 
     // LOCAL PROTOTYPE (KVMem-style ring): demote the oldest Device-resident pages (skipping the
     // attention sink and, on the first pass, `preferred`) until at least `target_free` Device pages

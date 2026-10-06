@@ -4,6 +4,7 @@
 
 #include "core/device.h"
 #include "core/nvtx.h"
+#include "ninfer/failure_class.h"
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
@@ -21,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <future>
@@ -2182,8 +2184,46 @@ private:
     // materializing requests, resets the scheduler and program state, but leaves pending requests
     // in the FIFO so they can retry once memory is freed.  The worker loop continues after this.
     // The worker holds execution_mutex_ across the failing operation and this cleanup.
-    void recover_from_oom_locked(std::exception_ptr error) noexcept {
+    // THE funnel: the one place that turns an in-flight exception into what a CLIENT sees.
+    //
+    // Why it exists (audit 2026-10-04, F2): the same capacity event used to leave the engine three
+    // different ways depending on WHERE it was caught. Admission and the materialization transaction
+    // wrap it as RequestError(Overloaded) -> HTTP 429 `server_overloaded`
+    // (serve/generation_service.cpp:67-72), which is what docs/maintainer/consolidated-line.md:24
+    // promises; the worker's out-of-memory path handed the RAW exception to force_complete_error, so a
+    // full store surfaced as HTTP 500 `internal_error` through http_server.cpp:37-43, and neither of
+    // those OOM-path failures moved ninfer:context_cache_exhausted_requests_total.
+    //
+    // One event class, one answer: every failure that reaches this engine's recovery paths goes
+    // through here, and the classification itself lives in ninfer/failure_class.h (a table, pinned by
+    // tests/test_failure_class.cpp) instead of being re-decided at each catch site.
+    //   * Capacity -> RequestError(Overloaded, ...) : readable, retryable, and COUNTED by the caller.
+    //   * Invariant / Other -> unchanged: the flag decides whether we got here at all, and an
+    //     unclassified exception must keep crashing rather than be guessed at.
+    [[nodiscard]] std::exception_ptr to_client_error(std::exception_ptr error) noexcept {
+        if (!error) { return oom_fallback_error_; }
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& failure) {
+            if (!is_capacity_failure(failure)) { return error; }
+            try {
+                return std::make_exception_ptr(
+                    RequestError(RequestErrorKind::Overloaded, capacity_failure_message(failure)));
+            } catch (...) {
+                return oom_fallback_error_;
+            }
+        } catch (...) {
+            return error;
+        }
+    }
+
+    // Fails everything this worker owns because of `error`, and RETURNS how many requests that was --
+    // the return value exists so the caller can count capacity failures per request (the metric) and
+    // report the blast radius in one number.
+    std::uint32_t recover_from_oom_locked(std::exception_ptr error) noexcept {
+        error = to_client_error(error);
         if (!error) { error = oom_fallback_error_; }
+        std::uint32_t failed = 0;
         try { scheduler_.reset(); } catch (...) {}
         const std::shared_ptr<Request> materializing_request =
             materializing_ ? materializing_->request : nullptr;
@@ -2194,15 +2234,18 @@ private:
                 auto slot_request = std::move(slots_[lane]);
                 slots_[lane].reset();
                 force_complete_error(slot_request, error);
+                ++failed;
             }
         }
         if (materializing_request != nullptr) {
             force_complete_error(materializing_request, error);
+            ++failed;
         }
         // The failing unit may have consumed the admission check: re-arm it so the still-pending
         // FIFO requests are inspected again without waiting for a new submission.
         request_admission_check();
         try { publish_runtime_stats(); } catch (...) {}
+        return failed;
     }
 
     enum class ProgramCleanup : std::uint8_t {
@@ -2242,6 +2285,21 @@ private:
             pending.swap(pending_);
         }
         try { scheduler_.reset(); } catch (...) {}
+        // HOW MUCH WAS LOST. The reason itself is already logged by the caller (`worker crash: %s`,
+        // or the recovery-exhausted lines); what a post-mortem cannot reconstruct is the scope -- how
+        // many lanes and queued requests this failure dropped. A shutdown is not a failure, so that
+        // call site (ProgramCleanup::Shutdown) stays quiet.
+        if (cleanup != ProgramCleanup::Shutdown) {
+            std::uint32_t lanes_in_flight = 0;
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                if (slots_[lane] != nullptr) { ++lanes_in_flight; }
+            }
+            publish_diagnostic(diagnostics_, DiagnosticLevel::Error,
+                               "engine failed: %u lane(s) in flight, %u materializing, %u queued "
+                               "request(s) dropped",
+                               lanes_in_flight, materializing_.has_value() ? 1U : 0U,
+                               static_cast<std::uint32_t>(pending.size()));
+        }
         const std::shared_ptr<Request> materializing_request =
             materializing_ ? materializing_->request : nullptr;
         try { materializing_.reset(); } catch (...) {}
@@ -2275,6 +2333,18 @@ private:
         try {
             publish_runtime_stats();
         } catch (...) {}
+        // `failed_` keeps every later request out, so this Engine cannot serve again: the process
+        // would stay up answering HTTP (including /v1/models) while nothing can run. Exiting is what
+        // a supervisor needs; opt in with NINFER_EXIT_ON_WORKER_CRASH=1 so a deployment can choose
+        // restart-on-crash instead of a zombie. The HTTP layer already answers 503 while unavailable.
+        if (const char* exit_on_crash = std::getenv("NINFER_EXIT_ON_WORKER_CRASH");
+            exit_on_crash != nullptr && exit_on_crash[0] != '\0' && exit_on_crash[0] != '0') {
+            std::fprintf(stderr,
+                         "[ninfer] worker crash: exiting with code 3 "
+                         "(NINFER_EXIT_ON_WORKER_CRASH is set)\n");
+            std::fflush(stderr);
+            std::_Exit(3);
+        }
     }
 
     void worker_loop() noexcept {
@@ -2419,8 +2489,16 @@ private:
                 std::exception_ptr oom_error;
                 try { oom_error = std::current_exception(); } catch (...) {}
                 if (!oom_error) { oom_error = oom_fallback_error_; }
+                // Was this a capacity refusal (`ContextCacheExhausted` / a plain allocation failure)
+                // rather than a generic bad_alloc? Then the requests this recovery drops have to be
+                // counted in the same metric the admission path feeds -- the metric is what an
+                // operator watches, and until 2026-10-04 the OOM path was invisible in it.
+                const bool capacity_failure = ninfer::is_capacity_failure(oom);
                 HostPhaseMeasurement cleanup = begin_host_phase();
-                recover_from_oom_locked(oom_error);
+                const std::uint32_t dropped = recover_from_oom_locked(oom_error);
+                if (capacity_failure) {
+                    cumulative_stats_.context_cache_exhausted_requests += dropped;
+                }
                 finish_engine_phase(cleanup, EngineHostPhase::Maintenance);
                 oom_backoff_ = kOomBackoffIterations;
                 // Scheduler state was cleared by recover_from_oom_locked; treat the next
