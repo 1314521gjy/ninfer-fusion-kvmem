@@ -119,8 +119,8 @@ LICENSE                                 Apache License 2.0（仅覆盖本仓内�
 patches/                                我们对上游引擎的改动（38 个源文件 + 逐文件说明）
   README-改动说明.md                    ← 基线、判据、按主题分类、诚实清单（做改动的人先读这个）
   changed-files/                        改动后的完整文件，路径与引擎源码树一一对应
-  changed-source.txt38 行，机器可读
-  changed-files.txt136 条（M 92 + A 44），逐文件对账原始清单
+  changed-source.txt                    38 行，机器可读
+  changed-files.txt                     136 条（M 92 + A 44），逐文件对账原始清单
 docs/                                   对外口径的技术文档
   00-三档口径与读数.md                   实测读数：速度 / 显存 / 长上下文复用
   01-部署与编译总白皮书.md                从零到出包：配置项逐条、构建、ring 五开关、验收判据
