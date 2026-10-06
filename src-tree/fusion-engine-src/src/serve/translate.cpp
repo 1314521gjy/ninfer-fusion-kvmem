@@ -428,13 +428,23 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
             request.thinking_budget ? request.thinking_budget : server.default_thinking_budget;
     }
     options.execution.sampling             = resolve_sampling_overrides(request.sampling, server);
-    // S2 (issue #3, landed 2026-10-07): the thinking channel gets its own presence penalty. The
-    // injection point is AFTER resolve_sampling_overrides on purpose: a server-side
-    // `--presence-penalty 0` is an explicit override (sampling.cpp: overrides.value_or(preset)), so it
-    // would otherwise swallow any preset the frontend resolved. Only requests that are actually in
-    // thinking mode are touched -- the NonThinking/tool channel keeps the global value.
-    if (semantics.enable_thinking != false && server.thinking_presence_penalty.has_value()) {
-        options.execution.sampling.presence_penalty = *server.thinking_presence_penalty;
+    // Request-level override chain (issue #3 follow-up, 2026-10-13): request.thinking_presence_penalty
+    // > server --thinking-presence-penalty (optional) > unset. Applied AFTER
+    // resolve_sampling_overrides on purpose: a server-side `--presence-penalty 0` is an explicit
+    // override (sampling.cpp: overrides.value_or(preset)), so it would otherwise swallow any preset
+    // the frontend resolved. Only thinking-mode requests are touched -- the NonThinking/tool channel
+    // keeps the global value. An explicit request 0 disables the thinking presence entirely, enabling
+    // the adaptive-guard pattern: healthy rounds run tax-free, the client guard injects presence only
+    // on/after degenerate rounds and removes it once the session recovers.
+    if (semantics.enable_thinking != false) {
+        std::optional<float> thinking_presence = server.thinking_presence_penalty;
+        if (request.thinking_presence_penalty) {
+            thinking_presence = request.thinking_presence_penalty;
+        }
+        if (thinking_presence && *thinking_presence != 0.0F) {
+            options.execution.sampling.presence_penalty = *thinking_presence;
+        }
+    }
     }
     options.execution.post_thinking_sampling =
         resolve_post_thinking_overrides(request.post_thinking, server);
