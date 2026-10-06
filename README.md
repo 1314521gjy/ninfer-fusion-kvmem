@@ -150,6 +150,9 @@ verify/                                 判据脚本（每个都有"怎么变红
   自检-引擎与卡匹配.ps1                   本机卡能不能跑这个包（架构边界）
   verify-arch-engine.ps1                 本卡验收：起服务 + 过池告警臂 + 题面中段针
   verify-kit-manifest.ps1                清单逐文件校验
+  README-判据与负控.md                        ★ 本目录入口：每个脚本「怎么变红」的负控说明
+  capability-diff-vs-upstream.py         与上游基线算能力差集（`我方-新增能力与已解决问题.md` 的复算脚本）
+  reconcile-vs-upstream.ps1              与上游基线逐文件 SHA256 对账（identical/modified/added/missing）
 ```
 
 ---
