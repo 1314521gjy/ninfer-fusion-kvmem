@@ -49,6 +49,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
    与 `docs/08-从零复现兜底` 里记的就是正确行为**（`unknown argument: --disk-cache` ⇒ 删掉它）。
    **本条里仍然成立的**：① 要抓服务器自报字段反证配置生效（这永远成立）；② 别的批（F2 之后）的启动器
    参数**照抄到本树会启动即拒**（`--no-kv-lease-growth` 只有肯定式的 `--kv-lease-growth`，默认 `false`）。
+5. **"真红被读成绿"：崩溃 / 缺 DLL 的用例会被漏数（2026-10-07 实测，已修）** —— `verify-tests-ctest-negcontrol.ps1`
+   原先有三处叠加缺陷：① 用 `[xml](Get-Content -Raw)` 读 JUnit（前言声明 `encoding="UTF-8"` 时 .NET 抛异常）⇒ 返回 `$null`；
+   ② 按 `<testsuites><testsuite>` 找用例，而本项目 JUnit 的**根元素就是 `<testsuite>`** ⇒ **永远解析到 0 条**；
+   ③ 退回控制台解析的正则只认 `Passed|Failed|Skipped|Timeout`，而崩掉的用例打的是
+   `… Exit code 0xc0000135***Exception: 550.57 sec` ⇒ **该用例被直接丢掉**。
+   **后果（当真发生过）**：4 个用例里 3 个崩，脚本报 `passed=1 failed=0 of 1` ⇒ **`VERDICT = PASS`**，而 `ctest` 自己返回 8。
+   **修法**：JUnit 改成按路径 `XmlDocument.Load()` 读、两种根元素都接受、控制台正则补崩溃形态，并加两条**硬不变量** ——
+   **`ctest` 自己的返回码**与**子集应有条数（`ctest -N -R` 的 `Total Tests`）**必须与解析结果一致，否则一律 `NOT-CLEAN` 并打印原因。
+   **规矩**：解析器的"少算/漏报"必须由**外部权威**兜住，不能只靠 `tests>0 且 failed==0` 这种自证式判据。
+6. **跑 ctest 前把 CUDA bin 放进 PATH**（`E:\cuda-13.3\bin\x64`；`cudart64_13.dll` 只在那里，`bin\` 下没有）：
+   否则多数用例以 **`0xC0000135`（STATUS_DLL_NOT_FOUND）** 失败，**而且可能表现为"先卡几分钟再失败"**（实测 `ninfer_hadamard_transform_test` 崩前挂了 550 s）。
+   **这不是代码回归** —— 同一二进制带上 `bin\x64` 后 4/4 通过（2.31 s）。
 
 ## 3. 与白皮书的关系
 

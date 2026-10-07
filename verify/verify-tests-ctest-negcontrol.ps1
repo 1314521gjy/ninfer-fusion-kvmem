@@ -65,11 +65,21 @@ function Read-CtestConsole([string[]]$lines) {
   #   "    1/5 Test   #2: ninfer_failure_class_test .............   Passed    0.01 sec"
   $cases = @()
   foreach ($line in $lines) {
-    $m = [regex]::Match([string]$line, '^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+\.*\s*(\*{0,3})(Passed|Failed|Skipped|Timeout)\s+([\d.]+)\s+sec')
+    $s = [string]$line
+    $m = [regex]::Match($s, '^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+\.*\s*(\*{0,3})(Passed|Failed|Skipped|Timeout)\s+([\d.]+)\s+sec')
     if ($m.Success) {
       $status = $m.Groups[3].Value.ToLower()
-      if ($m.Groups[2].Value.Length -gt 0 -and $status -eq 'failed') { $status = 'failed' }
       $cases += [pscustomobject]@{ name = $m.Groups[1].Value; seconds = $m.Groups[4].Value; status = $status; message = 'from ctest console' }
+      continue
+    }
+    # BUGFIX 2026-10-07: a test that CRASHES or cannot load a DLL prints a DIFFERENT shape --
+    #   "2/4 Test  #82: ninfer_qwen3_5_context_store_test ...Exit code 0xc0000135***Exception: 277.67 sec"
+    # The pattern above does not match it, so the case was DROPPED: with 3 of 4 tests failing this way
+    # the summary read "passed=1 failed=0 of 1" and the verdict said PASS. Count it as failed here,
+    # and note the caller additionally cross-checks ctest's own return code and the expected count.
+    $mc = [regex]::Match($s, '^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+.*?(Exit code \S+|\*{3}Exception|Exception)\s*:?\s*([\d.]+)\s+sec')
+    if ($mc.Success) {
+      $cases += [pscustomobject]@{ name = $mc.Groups[1].Value; seconds = $mc.Groups[3].Value; status = 'failed'; message = ('from ctest console: ' + $mc.Groups[2].Value) }
     }
   }
   return $cases
@@ -77,9 +87,18 @@ function Read-CtestConsole([string[]]$lines) {
 
 function Read-JUnit([string]$junitPath) {
   if (-not (Test-Path $junitPath)) { return $null }
-  try { $xml = [xml](Get-Content $junitPath -Raw) } catch { return $null }
+  # BUGFIX 2026-10-07: `[xml](Get-Content -Raw)` THROWS when the JUnit prolog declares
+  # encoding="UTF-8" (a .NET string cannot switch encodings), so this returned $null for a perfectly
+  # good report and silently fell back to console parsing -- which then undercounted the cases.
+  # Load by PATH so the declaration is honoured.
+  try { $xml = New-Object System.Xml.XmlDocument; $xml.Load($junitPath) } catch { return $null }
   $cases = @()
-  foreach ($suite in $xml.testsuites.testsuite) {
+  # BUGFIX 2026-10-07 (the other half): this project's JUnit writer emits a <testsuite> ROOT, not a
+  # <testsuites> wrapper, so `$xml.testsuites.testsuite` was ALWAYS EMPTY and the reader silently
+  # returned 0 cases -- the real reason every run fell back to console parsing. Accept either shape.
+  $suites = @()
+  if ($xml.testsuites) { $suites = @($xml.testsuites.testsuite) } elseif ($xml.testsuite) { $suites = @($xml.testsuite) }
+  foreach ($suite in $suites) {
     foreach ($case in $suite.testcase) {
       $status = 'passed'
       $message = ''
@@ -140,12 +159,30 @@ $cases | ForEach-Object { Write-Host ("    {0,-44} {1,-16} {2,7}s  {3}" -f $_.na
 $nPass = @($cases | Where-Object { $_.status -eq 'passed' }).Count
 $nFail = @($cases | Where-Object { $_.status -eq 'failed' }).Count
 $nSkip = @($cases | Where-Object { $_.status -like 'skipped*' }).Count
+# How many tests SHOULD the subset have matched? Ask ctest itself. A parser that silently drops
+# cases is a false-green mode (measured 2026-10-07: a crashed test's console line was unmatched, the
+# summary read "passed=1 failed=0 of 1", and the verdict said PASS while ctest reported 3 of 4 failed).
+$expected = 0
+$subListOut = & ctest --test-dir $BuildDir -N -R $Subset 2>&1
+$me = [regex]::Match(($subListOut -join "`n"), 'Total Tests:\s*(\d+)')
+if ($me.Success) { $expected = [int]$me.Groups[1].Value }
+Write-Host ("  subset expected (ctest -N -R) = " + $expected)
+
 Write-Host ""
-Write-Host ("--- summary: passed={0} failed={1} skipped={2} of {3} run ---" -f $nPass, $nFail, $nSkip, $cases.Count)
+Write-Host ("--- summary: passed={0} failed={1} skipped={2} of {3} run (expected {4}) ---" -f $nPass, $nFail, $nSkip, $cases.Count, $expected)
 Write-Host "  NOTE: a skip (exit 77) is a machine-capacity skip, NOT a pass; it leaves behaviour unverified."
 
-$subsetVerdict = if ($cases.Count -gt 0 -and $nFail -eq 0 -and $nSkip -eq 0) { 'PASS' } else { 'NOT-CLEAN' }
-Write-Host ("VERDICT subset = " + $subsetVerdict)
+# HARD INVARIANTS (2026-10-07): ctest's own return code and the registered subset size are
+# AUTHORITATIVE. If either disagrees with the parsed cases, the PARSER is wrong -- and a wrong parser
+# must never produce PASS.
+$verdictReasons = @()
+if ($cases.Count -eq 0) { $verdictReasons += 'no cases parsed' }
+if ($nFail -gt 0) { $verdictReasons += ('failed=' + $nFail) }
+if ($nSkip -gt 0) { $verdictReasons += ('skipped=' + $nSkip) }
+if ($expected -gt 0 -and $cases.Count -ne $expected) { $verdictReasons += ('parsed ' + $cases.Count + ' of ' + $expected + ' expected => parser undercount') }
+if ($run.rc -ne 0 -and $nFail -eq 0) { $verdictReasons += ('ctest rc=' + $run.rc + ' but parsed failures=0 => parser missed failures') }
+$subsetVerdict = if ($verdictReasons.Count -eq 0) { 'PASS' } else { 'NOT-CLEAN' }
+Write-Host ("VERDICT subset = " + $subsetVerdict + $(if ($verdictReasons.Count -gt 0) { "   reasons: " + ($verdictReasons -join '; ') } else { "" }))
 
 $ncVerdict = 'not-run'
 if ($NegativeControl) {
