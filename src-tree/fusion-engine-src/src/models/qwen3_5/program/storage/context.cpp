@@ -2047,6 +2047,25 @@ std::uint32_t proto_kv_retrieve_pages() {
     static const std::uint32_t pages = proto_env_pages("NINFER_KV_RETRIEVE");
     return pages;
 }
+// B32 (2026-10-07): is the retrieval budget literally UNSET? proto_env_pages cannot tell "unset" from
+// an explicit 0 (both return 0), and an explicit value must stay authoritative -- a switch the operator
+// set and the engine silently overrode is the defect class B25 was about ("=0 must mean 0"). The
+// fallback below therefore fires only when the variable is absent or empty.
+bool retrieve_budget_unset() {
+    const char* text = std::getenv("NINFER_KV_RETRIEVE");
+    return text == nullptr || text[0] == '\0';
+}
+
+// B32 (2026-10-07): the off switch for the retrieval fallback added at its call site. Unset -- or any
+// value whose first character is not '0' -- keeps the fallback ON, matching how this file reads every
+// other switch. It exists only so the fallback can be turned off for a negative control.
+bool retrieve_auto_enabled() {
+    static const bool enabled = [] {
+        const char* text = std::getenv("NINFER_KV_RETRIEVE_AUTO");
+        return text == nullptr || text[0] == '\0' || text[0] != '0';
+    }();
+    return enabled;
+}
 
 // LOCAL FIX (ring retrieval budget, 2026-10-02): the budget used to be a hard-wired quarter of the
 // pool (`pool / 4U`), and in the delivered shape that quarter is the BINDING term -- pool = 280 pages
@@ -2409,7 +2428,36 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         // page the previous selection stays valid). Between rescores the hysteresis set is reused.
         const std::uint32_t pool   = text_kv_pages->physical_pool().usable_pages();
         const std::uint32_t share  = pool * proto_kv_retrieve_share_percent() / 100U;
-        const std::uint32_t budget = std::min(proto_kv_retrieve_pages(), share);
+        std::uint32_t budget       = std::min(proto_kv_retrieve_pages(), share);        // ---- B32 (2026-10-07): the retrieval budget had NO default. ---------------------------------
+        // WHY THIS EXISTS: proto_env_pages returns 0 when NINFER_KV_RETRIEVE is unset, and NOTHING in
+        // this tree sets it (no launcher, script or doc), so the shipped default is budget = 0: the
+        // ring demotes pages and never brings any back. Measured on this build (2026-10-07): such a
+        // request answers out of a MASKED middle with HTTP 200 and a plausible wrong answer -- the
+        // exact condition generation_service.cpp warns about but does not refuse. The same
+        // measurement with the budget supplied by hand: 0/6 correct at budget 0, 6/6 at 8192 tokens
+        // on a content-distinct fixture. A fix that ships switched off is a fix the user does not
+        // have (startup.cpp:1239), which is why the default below is ON.
+        // THE CONDITION IS DELIBERATELY NARROW: only when the caller left NINFER_KV_RETRIEVE unset
+        // (budget 0), only on the ring path, and only when this request's own KV (text_total pages)
+        // exceeds the pool. An explicit NINFER_KV_RETRIEVE -- including 0 -- is respected untouched.
+        // THE CAP RESPECTS THE RESTORE PATH'S SLACK: ensure_ring_room keeps free pages because a
+        // restore needs a free slot (context.cpp:2305), so the fallback stops short of the pool
+        // instead of taking every free page.
+        if (budget == 0U && retrieve_budget_unset() && retrieve_auto_enabled() && text_total > pool) {
+            constexpr std::uint32_t kRestoreSlackPages = 4U;
+            const std::uint32_t room =
+                pool > sink_pages + kRestoreSlackPages ? pool - sink_pages - kRestoreSlackPages : 0U;
+            const std::uint32_t auto_budget = std::min(share, room);
+            if (auto_budget != 0U) {
+                budget = auto_budget;
+                std::fprintf(stderr,
+                             "[ring] retrieve AUTO-ENABLED: prompt %u pages > pool %u pages and "
+                             "NINFER_KV_RETRIEVE is unset -> budget %u pages (skeleton %u, "
+                             "restore-slack %u). Set NINFER_KV_RETRIEVE to pick a budget, or "
+                             "NINFER_KV_RETRIEVE_AUTO=0 for the old (budget 0) behaviour.\n",
+                             text_total, pool, budget, sink_pages, kRestoreSlackPages);
+            }
+        }
         // ---- P1-a BUDGET LINE (2026-10-05): the pool's split, in one auditable row. --------------
         // WHY: the plan's P1-a asks for "[ring] budgets: skeleton=S, evidence=E, recent=R, free=F
         // (pool P)" so that the NEXT person can see where the KV budget went without reading code.
