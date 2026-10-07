@@ -269,11 +269,19 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
                      const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
                      LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
     const bool qk = is_ternary(query_key_weight.qtype);
+    const bool gv = is_ternary(gate_value_weight.qtype);
     // Same rule as the I line's require_ternary_attn_parents: both parents must be ternary AND the
     // same format ("both ternary split parents must use the same format"). Admitting a mixed
     // T2 / PTQ1 pair would run one packing's arithmetic over the other's bytes.
-    if (qk != is_ternary(gate_value_weight.qtype) ||
-        query_key_weight.qtype != gate_value_weight.qtype) {
+    // B26 fix (2026-10-07): that rule is about the TERNARY pair. Two non-ternary parents of different
+    // formats are the documented split profile (require_rowsplit(query_key_weight, Q4_G64_FP16, ...)
+    // plus require_rowsplit(gate_value_weight, Q5_G64_FP16, ...) further down), so it must return false,
+    // not throw -- the old predicate rejected the very shape the shape checks require.
+    if (qk != gv) {
+        throw std::invalid_argument(
+            "attn_input_proj: both ternary split parents must use the same format");
+    }
+    if (qk && query_key_weight.qtype != gate_value_weight.qtype) {
         throw std::invalid_argument(
             "attn_input_proj: both ternary split parents must use the same format");
     }

@@ -760,9 +760,21 @@ void require_split_profile(const Tensor& x, const Weight& qk_weight, const Weigh
 
 bool t2_two_parent(const Weight& qk_weight, const Weight& value_z_weight) {
     const bool qk = is_ternary(qk_weight.qtype);
-    // The I line's require_ternary_split_parents rule, verbatim in substance: both ternary, and the
-    // same format.
-    if (qk != is_ternary(value_z_weight.qtype) || qk_weight.qtype != value_z_weight.qtype) {
+    const bool vz = is_ternary(value_z_weight.qtype);
+    // The I line's require_ternary_split_parents rule, verbatim in substance: BOTH parents ternary and
+    // the same format.
+    // B26 fix (2026-10-07): that rule is about the TERNARY pair only. Two NON-ternary parents of
+    // DIFFERENT formats are the documented split profile -- require_split_profile() just below demands
+    // qk=Q4_G64_FP16 and value/z=Q5_G64_FP16 -- so that combination must return false, not throw. Before
+    // this fix the predicate rejected the very shape the shape checks require, and every test that built
+    // it died on an uncaught std::invalid_argument (0xC0000409, no output). A mixed ternary /
+    // non-ternary pair, and two ternary parents of different formats, still throw: admitting them would
+    // run one packing's arithmetic over the other's bytes.
+    if (qk != vz) {
+        throw std::invalid_argument(
+            "gdn_input_proj: both ternary split parents must use the same format");
+    }
+    if (qk && qk_weight.qtype != value_z_weight.qtype) {
         throw std::invalid_argument(
             "gdn_input_proj: both ternary split parents must use the same format");
     }
