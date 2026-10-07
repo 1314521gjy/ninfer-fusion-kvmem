@@ -2673,10 +2673,10 @@ bool ProgramImpl::isolated_request_feasible(const RequestBasePlan& base) const n
         // allocator recycles through a smaller physical pool. A single request may therefore
         // legitimately carry a logical page entitlement larger than the pool; the ring keeps
         // the resident set within the pool. Clamp the logical demand to the pool for admission.
-        if (value.device.main_kv_pages > limit.device.main_kv_pages) {
+        if (ring_requested() && value.device.main_kv_pages > limit.device.main_kv_pages) {
             value.device.main_kv_pages = limit.device.main_kv_pages;
         }
-        if (value.device.backend_kv_pages > limit.device.backend_kv_pages) {
+        if (ring_requested() && value.device.backend_kv_pages > limit.device.backend_kv_pages) {
             value.device.backend_kv_pages = limit.device.backend_kv_pages;
         }
         const bool ok =
@@ -2692,7 +2692,7 @@ bool ProgramImpl::isolated_request_feasible(const RequestBasePlan& base) const n
     // logical page entitlement must not be compared against it. Clamping it to the pool does not
     // work: the check is `used + added <= capacity`, so clamping `added` to `capacity` forces
     // `used == 0` and rejects every request once the pool holds anything. Zero the dimension.
-    const bool ring = text_kv_pages != nullptr && text_kv_addresses != nullptr &&
+    const bool ring = ring_requested() && text_kv_pages != nullptr && text_kv_addresses != nullptr &&
                       text_kv_pages->physical_pool().usable_pages() <
                           text_kv_addresses->logical_page_capacity();
     detail::PhysicalResources peak  = base.impl_->root_demand.physical_peak_additional;
@@ -2734,7 +2734,7 @@ bool ProgramImpl::persistent_backfill_safe(
     const auto fits                          = [](detail::PhysicalResources value,
                          detail::PhysicalResources limit) noexcept {
         // LOCAL PROTOTYPE (KVMem-style ring): see isolated_request_feasible.
-        if (value.device.main_kv_pages > limit.device.main_kv_pages) {
+        if (ring_requested() && value.device.main_kv_pages > limit.device.main_kv_pages) {
             value.device.main_kv_pages = limit.device.main_kv_pages;
         }
         return value.device.active_lanes <= limit.device.active_lanes &&
@@ -2746,7 +2746,7 @@ bool ProgramImpl::persistent_backfill_safe(
     };
     const detail::PhysicalDemand& head = blocked_head.impl_->root_demand;
     // LOCAL PROTOTYPE (KVMem-style ring): see isolated_request_feasible.
-    const bool ring = text_kv_pages != nullptr && text_kv_addresses != nullptr &&
+    const bool ring = ring_requested() && text_kv_pages != nullptr && text_kv_addresses != nullptr &&
                       text_kv_pages->physical_pool().usable_pages() <
                           text_kv_addresses->logical_page_capacity();
     detail::PhysicalResources peak  = checked_resource_sum(borrowers, head.physical_peak_additional);

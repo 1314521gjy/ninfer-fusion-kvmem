@@ -280,8 +280,11 @@ std::vector<double> reference_encode(const CpuVisionWeights& w,
             auto up = project(layer.fc1, layer.fc1_bias,
                               norm(x[p], layer.norm2_weight, layer.norm2_bias), w.intermediate);
             for (double& value : up) {
+                // M_PI is not defined by MSVC's <cmath> (it needs _USE_MATH_DEFINES before the first
+                // math header, which this tree uses nowhere). Spell the double out instead of adding
+                // a macro whose meaning depends on include order.
                 value = 0.5 * value *
-                        (1.0 + std::tanh(std::sqrt(2.0 / M_PI) *
+                        (1.0 + std::tanh(std::sqrt(2.0 / 3.14159265358979323846) *
                                          (value + 0.044715 * value * value * value)));
             }
             const auto down = project(layer.fc2, layer.fc2_bias, up, H);

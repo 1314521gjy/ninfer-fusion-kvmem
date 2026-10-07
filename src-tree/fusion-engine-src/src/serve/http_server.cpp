@@ -416,6 +416,24 @@ httplib::Server::HandlerResponse HttpServer::pre_route(const httplib::Request& r
         }
         return httplib::Server::HandlerResponse::Handled;
     }
+    // A worker that already failed -- or a context cache wedged by three refusals in a row -- leaves
+    // the Engine unable to serve for the rest of the process's life. Answering 503 here turns the old
+    // shape ("/v1/models still 200, then every request 500s") into something a healthcheck can act
+    // on. /health keeps its own handler so probes still get {"status":"unavailable"}.
+    if (req.path != "/health" && service_ != nullptr && !service_->is_available()) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "engine_unavailable";
+        error.code    = "engine_unavailable";
+        error.message = "The engine worker is no longer available. Restart the process.";
+        res.set_header("Retry-After", "5");
+        if (req.path.rfind("/v1/messages", 0) == 0) {
+            write_anthropic_error(res, error, new_anthropic_request_id());
+        } else {
+            write_openai_error(res, error);
+        }
+        return httplib::Server::HandlerResponse::Handled;
+    }
     // The MCP relay carries no API key: the WebUI prefixes every header it means for the MCP
     // server, its own Authorization included, so requiring the key would break the relay
     // rather than protect it. It is opt-in, and the bind address is its boundary.

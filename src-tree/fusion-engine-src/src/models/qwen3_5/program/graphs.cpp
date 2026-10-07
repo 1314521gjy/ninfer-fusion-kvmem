@@ -141,6 +141,11 @@ void ProgramImpl::prepare_graphs() {
                     "KV address space cannot provide a CUDA Graph capture entry");
             }
             allocations.push_back(*allocation);
+            // Deliberately NOT ensure_ring_room: this runs once at startup, before any sequence owns a
+            // page, so there is nothing to demote and the pool is empty by construction. The capacity
+            // check above (`pool.capacity_pages() < max_concurrency`) is the whole requirement here.
+            // In ring mode these `max_concurrency` pages stay allocated for the process's life -- they
+            // are the price of having a real address for every captured row.
             addresses.ensure_mapped_to_tokens(*allocation, 1, compute_streams);
 
             // Capture profiles exercise arbitrary context envelopes. Repeating each row's private

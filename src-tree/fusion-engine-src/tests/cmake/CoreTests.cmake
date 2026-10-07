@@ -4,6 +4,14 @@ add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+# Pins the failure classification table (include/ninfer/failure_class.h): which exception types mean
+# "no room right now -> the request is refused and the engine keeps serving" versus "our own
+# accounting broke". Public headers only, exactly like the test above: the table a client-visible
+# outcome depends on must be checkable without engine internals.
+add_executable(ninfer_failure_class_test "${CMAKE_CURRENT_LIST_DIR}/../test_failure_class.cpp")
+target_include_directories(ninfer_failure_class_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME ninfer_failure_class_test COMMAND ninfer_failure_class_test)
+
 ninfer_add_test(ninfer_wide_math_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_wide_math.cpp"
   LIBRARIES ninfer_core)

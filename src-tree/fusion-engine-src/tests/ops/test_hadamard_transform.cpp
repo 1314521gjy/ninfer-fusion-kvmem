@@ -6,6 +6,7 @@
 #include "core/device.h"
 #include "core/decode_graph.h"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -42,7 +43,12 @@ std::vector<double> hadamard_oracle(const std::vector<float>& input,
                     const double sign_before =
                         inverse ? 1.0 : static_cast<double>(signs[block * kBlock + j]);
                     const double value = static_cast<double>(input[base + j]) * sign_before;
-                    sum += (__builtin_popcount(static_cast<unsigned>(i & j)) & 1) ? -value : value;
+                    // std::popcount, not __builtin_popcount: the latter is a GCC/Clang builtin that
+                    // MSVC does not have. This tree already uses std::popcount for the same reason
+                    // (runtime/engine/context_cache/resource_manager.h) and six other test files
+                    // include <bit>. This TU had never been compiled before -- every other build dir
+                    // in the tree has BUILD_TESTING=OFF.
+                    sum += (std::popcount(static_cast<unsigned>(i & j)) & 1) ? -value : value;
                 }
                 const double sign_after =
                     inverse ? static_cast<double>(signs[block * kBlock + i]) : 1.0;

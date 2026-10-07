@@ -641,6 +641,10 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");
         }
+        // B01 (Class B: needs Device pages but never made room): the causal-scoring lane mapped its
+        // predictor pages straight into the pool. Make room first, and fail this request readably if
+        // the pool cannot be drained.
+        ensure_ring_room(*text_kv_addresses, *text_kv_pages, *address, predictor_count, {});
         text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, compute_streams);
 
         const std::int32_t state_slot = state_store->physical_slot(*state);
