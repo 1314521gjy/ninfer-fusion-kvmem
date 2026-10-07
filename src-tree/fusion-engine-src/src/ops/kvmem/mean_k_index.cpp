@@ -121,7 +121,21 @@ cudaError_t MeanKIndex::zero(cudaStream_t stream) {
 void MeanKIndex::append_round(const RawKShadowHarvest& store, std::int32_t first_block,
                               cudaStream_t stream) {
     if (total_bytes_ == 0 || store.layers() != layers_) { return; }
+    std::int32_t skipped       = 0;
+    std::int32_t first_skipped = -1;
     for (std::int32_t layer = 0; layer < layers_; ++layer) {
+        // LOCAL FIX (B08): feed the index only from layers whose staging slot was REALLY written this
+        // round. A slot that was never written still holds the previous round's bytes -- or, on the
+        // first round, whatever the allocation held -- and feeding that in is exactly the "plausible but
+        // wrong" evidence raw_k_harvest.h:172-177 exists to prevent: the sums would rank blocks by keys
+        // from another round with nothing looking wrong. Dropping one whole layer costs that layer's
+        // contribution for every block equally, so the ranking across blocks stays comparable, and the
+        // counter below is what makes "layer 0 was in this round" a reading instead of an assumption.
+        if (!store.layer_harvested(layer)) {
+            ++skipped;
+            if (first_skipped < 0) { first_skipped = layer; }
+            continue;
+        }
         const Tensor view = store.staging_for_round(layer);
         // staging_for_round() returns THIS layer's slice of the packed harvest buffer, so the base
         // pointer handed to append_one already identifies the source layer, and every call is a
@@ -130,6 +144,12 @@ void MeanKIndex::append_round(const RawKShadowHarvest& store, std::int32_t first
         // consulted by the multi-layer launch shape, which append_one deliberately does not use.
         append_one(view.data, layer, view.ne[1], first_block, store.tokens(),
                    heads_ * head_dim_ * store.tokens(), stream);
+    }
+    if (skipped != 0) {
+        std::fprintf(stderr,
+                     "kvmem index: round fed from %d of %d layer(s), skipped %d not harvested this "
+                     "round (first=%d) -- those slots hold another round's bytes\n",
+                     layers_ - skipped, layers_, skipped, first_skipped);
     }
 }
 

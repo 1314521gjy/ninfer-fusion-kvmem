@@ -1837,6 +1837,9 @@ void TextContext::kvmem_round_end() {
         const std::int32_t round_first_block =
             static_cast<std::int32_t>(text_kv_base_ / static_cast<std::uint32_t>(kPagedKVPageSize));
         index->append_round(*harvest, round_first_block, ctx_.stream);
+        // B08: hand this round's per-layer coverage to the scorer, so "layer 0 is in the index" shows
+        // up as a reading on the SELECT line instead of being something to assume.
+        ops::detail::kvmem_score_set_harvest_layers(harvest->layers_harvested(), harvest->layers());
     }
     // D2H + sync + selection, at the chunk tail and outside any capture (the glue's own contract).
     ops::detail::kvmem_score_finish("text_prefill_chunk", kvmem_round_width_, ctx_.stream);
