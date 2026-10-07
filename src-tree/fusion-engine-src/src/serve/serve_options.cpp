@@ -1110,19 +1110,25 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--stats-port must be in [1,65535] and differ from --port");
     }
     if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
-    // LOCAL PROTOTYPE (KVMem-style ring): the ring lets --kv-capacity be SMALLER than
-    // --max-context. Storage-side backing for it is the ring itself (device pool < logical context,
-    // with the recycled pages demoted to host memory), which is why the combination stays refused
-    // unless the experiment is explicitly enabled with NINFER_KV_RING=1. The dense production
-    // configuration is untouched: without the flag a too-small pool is rejected, exactly as before.
+    // LOCAL PROTOTYPE (KVMem-style ring): the ring lets --kv-capacity be SMALLER than --max-context.
+    // Storage-side backing for it is the ring itself (device pool < logical context, with the recycled
+    // pages demoted to host memory), which is why the combination stays refused unless the experiment
+    // is enabled. The dense production configuration is untouched: without the switch a too-small pool
+    // is rejected, exactly as before.
+    // B30 (fixed 2026-10-07): this gate used to read NINFER_KV_RING, while the engine-side gate
+    // (models/qwen3_5/program/planning/startup.cpp, ring_requested()) reads NINFER_KV_WINDOW. The
+    // engine's own advice therefore named the WRONG variable: setting only NINFER_KV_RING passed here
+    // and then died at startup with "kv_capacity must be at least max_context", never serving. Both
+    // ends now read NINFER_KV_WINDOW with the same predicate (present, non-empty, strtol > 0), and the
+    // message below names that variable.
     const bool kv_ring_enabled = [] {
-        const char* text = std::getenv("NINFER_KV_RING");
-        return text != nullptr && text[0] != '\0' && text[0] != '0';
+        const char* text = std::getenv("NINFER_KV_WINDOW");
+        return text != nullptr && std::strtol(text, nullptr, 10) > 0;
     }();
     if (!kv_ring_enabled && options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context "
-                                    "(set NINFER_KV_RING=1 to allow the experimental ring)");
+                                    "(set NINFER_KV_WINDOW=<window tokens> to allow the experimental ring)");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("--max-concurrency must be in [1,8]");

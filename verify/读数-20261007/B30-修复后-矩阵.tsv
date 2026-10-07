@@ -1,0 +1,4 @@
+﻿"arm"	"http"	"evidence"	"free"	"tool"	"engine_log_first"
+"only-ring"	"-1"	"-1"	"-1"	"-"	"ninfer-serve: --kv-capacity must be at least --max-context (set NINFER_KV_WINDOW=<window tokens> to allow the experimental ring)"
+"only-window"	"200"	"0"	"59"	"yes"	"[ring] budgets: skeleton=4, evidence=0, recent=0, free=59 (pool 63) [skeleton+evidence+recent+free == pool: yes]"
+"full-env"	"200"	"12"	"7"	"yes"	"[ring] budgets: skeleton=44, evidence=12, recent=0, free=7 (pool 63) [skeleton+evidence+recent+free == pool: yes]"
