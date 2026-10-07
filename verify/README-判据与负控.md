@@ -37,6 +37,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
    照原样读，你会拿**旧二进制**的绿灯当成新代码的结果（我们第一次跑分类表负控就是这样得了假绿）。
    修法：负控里**显式删掉 `.obj` 与 exe** 强制重编（`verify-tests-ctest-negcontrol.ps1` 已这么做并打印 `forced: …`）。
    系统含义：**这棵树的增量构建对头文件改动不可靠**，改头后请整目标重编。
+   ⭕ **2026-10-07 深夜补：这条同样咬"测试侧"，而且症状更凶（实测）** —— 改了 `src/serve/serve_options.h` 之后，serve 侧 36 个消费者 obj 是重编了的，但**链接进 `ninfer_tests.exe` 的那几个测试 TU 没重编**，于是同一个结构体在不同 TU 里布局不一致。症状**不是编译错误**，而是：
+   ① `ninfer_request_log_test` / `ninfer_serve_options_test` 直接 **fail-fast**（`0xC0000409`）或 **SEGV**；② `ninfer_openai_schema_test` **判错**三条 post_thinking / reasoning-effort 合并语义的断言；③ `ninfer_anthropic_schema_test` 在整跑里红、隔离跑绿（假红）。
+   **真正的测试侧消费者（改 `serve_options.h` / `generation_service.h` / `http_server.h` / `request_log.h` / `translate.h` 之一就要重编它们）**：`test_anthropic_schema.cpp` · `test_http_error_handler.cpp` · `test_openai_responses.cpp` · `test_openai_schema.cpp` · `test_request_log.cpp` · `test_serve_options.cpp`（对应 obj 目录 `build-ninja\tests\CMakeFiles\ninfer_<用例名>.dir\`）。
+   **修法（实测有效）**：删掉这些目录里的 `*.obj`（连带 `.dd`/`.ddi`）再 `ninja all` —— 本例删 7 个目录 21 个文件、重编 24 步后，**7/7 用例全绿、四项验收闸门 4/4**。
+   **纪律**：**改头文件之后，验收不要用"整跑过了"当唯一证据**；先按"头 → 直接/间接消费者 TU"清单强制重编，再跑；否则你会看到一组凭空出现、且**无法用逻辑解释**的红（本例就是，差点被当成 S2/S3 的功能回归）。
 4. **未知开关会被静默忽略**：参数解析链以 `src/serve/serve_options.cpp:992`
    `} else if (parse_dispatch_options(arg)) { }` 结束，**没有 else-throw**，全文件只有 `--help` 与 `argv[1]` 两处校验。
    ⇒ 每个开关都要对源码核实，并抓服务器**自报字段**反证它生效了（`INFO capacity | KV <N> tokens, <dtype>, explicit | pages X/Y`）；
