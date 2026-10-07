@@ -62,7 +62,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
    否则多数用例以 **`0xC0000135`（STATUS_DLL_NOT_FOUND）** 失败，**而且可能表现为"先卡几分钟再失败"**（实测 `ninfer_hadamard_transform_test` 崩前挂了 550 s）。
    **这不是代码回归** —— 同一二进制带上 `bin\x64` 后 4/4 通过（2.31 s）。
 7. **A 档跑批（2026-10-07）留下的四条可复用判据**（都已在发布线二进制 `3B4103B4…` 上跑过；驱动器只做编排，不新造仪器）：
-   - **kMin 工作页阈值 = 4 页**：池 58/59（`free` 2/3）⇒ 工具答错；池 60/61（`free` 4/5）⇒ 答对（复用 `probe-kmin-sweep.ps1`，sink 固定 44 页）。**与 2026-10-05 独立一致**。
+   - **kMin 工作页判据 = `pool − sink ≥ 16` 页**：池 58/59（`free` 2/3）⇒ 工具答错；池 60/61（`free` 4/5）⇒ 答对（复用 `probe-kmin-sweep.ps1`，sink 固定 44 页）。**⚠️ 2026-10-07 深夜更正**：不要写成"`free ≥ 4`"——`free` 只是**分给检索预算后的余数**；把 `RETRIEVE` 提到 1536 后 `free` **恒为 0** 而池 60 仍答对 ⇒ 控制量是 `pool − sink`（三组 × 三点边界一致在 16 页；`RETRIEVE`/`SHARE` 都不移动它）。**怎么变红**：若 `pool − sink = 15` 就答对、或 `= 16` 仍答错，则阈值不是 16。
    - **`NINFER_KV_SINK` 两份复刻同值**：`SINK=640` ⇒ 预算行 `skeleton=10`；`SINK=1920` ⇒ `skeleton=30`（若不等即为两份漂移）。
    - **池页数 == 逻辑页数 ⇒ 环被关**：池 1024 页 + `--max-context 65536` ⇒ 日志里**没有** `[ring] budgets:` 行（若出现，说明判据或引擎行为变了）。
    - **17920 交付档工具可见性**：池 280 页 + `SINK=2816` ⇒ 工具题必须答对（读同一探针的 `tool=` 列）。实测 **100%**。
