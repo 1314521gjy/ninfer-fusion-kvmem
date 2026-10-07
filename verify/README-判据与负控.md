@@ -107,6 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
 - **`读数-20261007/`** —— 上面脚本当天的**原始读数表**（TSV），文件名对应回执节次：`A档-a-tier.tsv` → §8.1–8.6 · `B档-b1-b2.tsv` → §8.8 · `B档-b2-4lanes.tsv` → §8.9 · `B3-*.tsv` → §8.3 的 kMin 判据 · `T1-full-258.tsv` + `T1-隔离-*.tsv` → §8.7。
   **2026-10-07 19:0x 补入（L0 批）**：`L0-驱动读数.tsv`（B27 起图失败率 10 次启动 + #17/#15 汇总）· `L0-17-假绿-*.tsv`（**假绿那一版**：池 280/sink 265，三格全 yes —— 保留它是为了记住"题面装进 skeleton 时该格不是判别格"）· `L0-17b-{A对照,B判别,C,D}.tsv`（**证伪 `pool − sink ≥ 16` 页的那四点**：题面 7,563 token 时 slack 16/18 都答错、slack 76 答对）· `L0-15-ring-{on,off}-*.tsv`（`max-context == 池` ⇒ 环被关）。
   **2026-10-07 深夜补入**：`B29-15臂-复跑.tsv`（B29 修复后那一族 15 条臂 **15/15 PASS**）· `四项验收闸门-B29后.tsv`（**4/4 PASS**）· `S2-配对重复-每臂3次.tsv` + `S2-判据结论.tsv`（S2 运行时统计与 C8–C11）· `B30-环两门矩阵.tsv`（**只设 `NINFER_KV_RING` ⇒ CLI 放行 + 引擎 FATAL；只设 `NINFER_KV_WINDOW` ⇒ CLI 拒；两个都设 ⇒ 200**）· `B24-空响应三臂.tsv`（不带预算 ⇒ `content` 空；带 `thinking_budget:1024` ⇒ 非空）。
+  **2026-10-07 深夜再补**：`B24-遥测-两臂.tsv`（引擎自报的 `repeat_dup8`：无惩罚 **0.23829** vs `--thinking-presence-penalty 2.0` **0.19222**，与 §9.2 的离线读数吻合 ⇒ 遥测本身的验证见回执 §11）。
   原始**大**日志（JUnit XML、ctest 控制台全文、引擎 `err.log`、E2/E5 harness 臂日志）留在本机未随仓发布；需要时按 §8.7 的**复现仪**与本节第 7 条重跑。
 
 ## 6. 2026-10-07 深夜补记（跑测试的两条操作事实 + 判据指针）

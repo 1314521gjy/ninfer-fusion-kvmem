@@ -14,6 +14,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cctype>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 #include <system_error>
 #include <utility>
 
@@ -884,11 +888,63 @@ std::string format_request_rejected_json(const std::string& server_instance_id,
     return record.dump();
 }
 
+namespace {
+
+// B24 / S6 telemetry (2026-10-07 late): make verbatim repetition a MEASURED number instead of a story.
+// WHY HERE AND NOT IN THE SAMPLER: the community patch (issue #3, direction 3) keeps a token-count ring
+// window inside generation. We measure the finished text in the request log instead, because (a) the
+// generation path is hot, (b) the outcome already carries both channels, and (c) an offline reading of
+// exactly this statistic already exists for this build (the receipt doc section 9.2: mean dup8 0.2385 without the
+// thinking penalty vs 0.1922 with it) -- so the telemetry can be checked against an INDEPENDENT
+// measurement instead of against itself. Nothing here changes generation: observability only.
+//
+// UNITS: whitespace-separated tokens -- the same tokenisation as that offline reading, so the numbers are
+// directly comparable. repeat_dup8 = 1 - unique8/total8. repeat_max8 = how many times the most frequent
+// 8-gram occurs (a loop detector: a degenerate loop drives it up while dup8 can stay moderate).
+struct RepeatStats {
+    const char* channel = "none";
+    std::size_t tokens  = 0;
+    std::size_t max8    = 1;
+    double uniq8        = 1.0;
+};
+
+RepeatStats repeat_stats(const std::string& reasoning, const std::string& content, std::size_t n = 8) {
+    const bool use_reasoning = !reasoning.empty();
+    const std::string& text  = use_reasoning ? reasoning : content;
+    RepeatStats out;
+    out.channel = use_reasoning ? "reasoning" : (content.empty() ? "none" : "content");
+    std::vector<std::string_view> toks;
+    for (std::size_t i = 0; i < text.size();) {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])) != 0) { ++i; }
+        const std::size_t start = i;
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])) == 0) { ++i; }
+        if (i > start) { toks.emplace_back(text.data() + start, i - start); }
+    }
+    out.tokens = toks.size();
+    if (toks.size() < n) { return out; }
+    std::unordered_map<std::string, std::size_t> counts;
+    const std::size_t total = toks.size() - n + 1;
+    std::string gram;
+    for (std::size_t i = 0; i < total; ++i) {
+        gram.clear();
+        for (std::size_t k = 0; k < n; ++k) {
+            if (k != 0) { gram.push_back(' '); }
+            gram.append(toks[i + k]);
+        }
+        const std::size_t seen = ++counts[gram];
+        if (seen > out.max8) { out.max8 = seen; }
+    }
+    out.uniq8 = static_cast<double>(counts.size()) / static_cast<double>(total);
+    return out;
+}
+
+}  // namespace
 std::string format_request_done_json(const std::string& server_instance_id, std::uint64_t timestamp,
                                      const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
     Json record       = event_base(server_instance_id, timestamp, "request_done");
     record["request"] = request_json(context);
+    const RepeatStats repeat = repeat_stats(outcome.reasoning, outcome.text);
     record["result"] =
         Json{{"finish_reason", finish_reason_name(outcome.finish_reason)},
              {"prompt_tokens", outcome.prompt_tokens},
@@ -906,7 +962,12 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
              {"thinking_control_applied", outcome.thinking.applied},
              {"post_thinking_sampling", outcome.thinking.post_thinking_sampling},
              {"tool_call_count", outcome.tool_calls.size()},
-             {"tool_call_parse", tool_call_parse_json(outcome.tool_call_parse)}};
+             {"tool_call_parse", tool_call_parse_json(outcome.tool_call_parse)},
+             {"repeat_channel", repeat.channel},
+             {"repeat_tokens", repeat.tokens},
+             {"repeat_uniq8", repeat.uniq8},
+             {"repeat_dup8", 1.0 - repeat.uniq8},
+             {"repeat_max8", repeat.max8}};
     record["timings_seconds"] = Json{
         {"prepare", outcome.metrics.prepare_seconds}, {"ttft", outcome.metrics.ttft_seconds},
         {"vision", outcome.metrics.vision_seconds},   {"prefill", outcome.metrics.prefill_seconds},

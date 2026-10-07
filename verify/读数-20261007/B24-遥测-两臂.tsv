@@ -1,0 +1,3 @@
+﻿"arm"	"http"	"finish"	"ctok"	"rtok"	"content_len"	"tel_channel"	"tel_tokens"	"tel_uniq8"	"tel_dup8"	"tel_max8"
+"A-nopenalty"	"200"	"length"	"3072"	"3072"	"0"	"reasoning"	"2185"	"0.7617079889807162"	"0.23829201101928377"	"30"
+"B-pp2.0"	"200"	"stop"	"2338"	"2334"	"3"	"reasoning"	"1703"	"0.8077830188679245"	"0.19221698113207553"	"23"
