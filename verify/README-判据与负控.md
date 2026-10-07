@@ -22,12 +22,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
 | `gate-ptq1档-清单与形状.ps1` | 同上，针对 PTQ1 档（含 `NINFER_TERNARY_PTQ1_FAST=1` 这条负载开关） | `KITCHECK_VERDICT=PASS (0 failure(s))` | 删掉启动器里那行 `NINFER_TERNARY_PTQ1_FAST=1` ⇒ 变红 |
 | `自检-引擎与卡匹配.ps1` | 本机这张卡能不能跑这个包（读 `nvidia-smi` 的 compute capability 与引擎支持的架构比对） | `HWCARD_VERDICT=PASS` | 拿 `sm_86` 的包在 `sm_89` 的卡上跑 ⇒ 架构不符，明确报错而不是"慢" |
 | `verify-arch-engine.ps1` | **本卡端到端验收**：起服务 + 过池告警臂（题面**中段**针）+ 装得下臂 | 起服务成功、过池臂答对中段针、装得下臂无告警 | 题面**中段针丢失 = FAIL**；`finish_reason=length` 或空答案 ⇒ **INCONCLUSIVE（不算漏针）** |
+| `verify-tests-ctest-negcontrol.ps1` | 受影响测试真跑通，且失败分类表被测试钉住（**源码批 2026-10-07 实测 `VERDICT subset = PASS`**） | `VERDICT subset = PASS` + `negative control verdict: PASS(...)` | 翻 `failure_class.h` 一行 ⇒ ctest 必须 **failed** 并打出 `std::bad_alloc must classify as Capacity`；字节级还原后必须回到 **passed** |
+| `verify-b01-overpool-429.ps1` | 装不下的请求被**可见拒绝**且引擎不被打死（429 + 编号消息 + 后续 200 + 存活 + 指标） | `refused with 429 = True` · `message carries a number = True` · `engine still serving (200) = True` · `server survived = True` | `-ShortProbeOnly`（不打断言）⇒ `refused` 必须 **False**、指标必须 **0**；`-ExpectStartRefusal` 是守卫正控，⚠️ **在本仓二进制上不成立**（见 B21），别拿它当红控 |
+| `verify-256k-nonring-regression.ps1` | 关环（KVMem off）下的 256k 长题 + 4 路并发 + checkpoint 复用，用的是 PR #2 自带的校验脚本 | `script exit = 0` 且报告每条 `passed=True`；`near_256k.prompt_tokens ∈ [250000, 262144]`；`cached_tokens > 0` | `-RedControl`（`--long-rows 200`）⇒ `script exit` 必须非 0（实测 **1**） |
+| `resolve-build-env.ps1` | **不是判据脚本**：上面两个需要工具链的脚本用它从**被测构建目录的 `CMakeCache.txt`** 反推 cl/ninja/CUDA 根/vcpkg 根，vcvars 用 `vswhere` 找 —— 所以这些脚本不带作者的机器路径 | `Show-BuildEnv` 打印出的每项都非空 | 任一字段取不到 ⇒ 脚本**打印** `could not derive <字段>`（不静默兜底）；把 `-BuildDir` 指到一个没配过的目录 ⇒ 直接以 "no CMakeCache.txt" 报错退出 |
 
 ## 2. 两条使用纪律（踩过才写的）
 
 1. **`/v1/models` 返回 200 不等于能服务** —— worker 死后它照样 200。判活必须**真发一条请求**。
 2. **同一个探针别用两种读法**：本篇所有"红控"都要在**同一支二进制**上做（例如检索窗口 64 → 256），
    否则你分不清是改动生效了还是换了个东西。
+3. **改头不触发重编（本树实测 2026-10-07）**：本构建用 CMake 的 scanned C++20 规则，`DEP_FILE` 指 `<obj>.ddi.d`
+   （**模块**依赖）⇒ **普通 `#include` 的头不是该 obj 的输入**，改它之后 `ninja` 会回答 `no work to do`。
+   照原样读，你会拿**旧二进制**的绿灯当成新代码的结果（我们第一次跑分类表负控就是这样得了假绿）。
+   修法：负控里**显式删掉 `.obj` 与 exe** 强制重编（`verify-tests-ctest-negcontrol.ps1` 已这么做并打印 `forced: …`）。
+   系统含义：**这棵树的增量构建对头文件改动不可靠**，改头后请整目标重编。
+4. **未知开关会被静默忽略**：参数解析链以 `src/serve/serve_options.cpp:992`
+   `} else if (parse_dispatch_options(arg)) { }` 结束，**没有 else-throw**，全文件只有 `--help` 与 `argv[1]` 两处校验。
+   ⇒ 每个开关都要对源码核实，并抓服务器**自报字段**反证它生效了（`INFO capacity | KV <N> tokens, <dtype>, explicit | pages X/Y`）；
+   本机就踩过：脚本里传的 `--no-kv-lease-growth` **在本树不存在**，被静默吞掉，而那一跑看起来是"成功"的。
 
 ## 3. 与白皮书的关系
 
