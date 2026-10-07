@@ -61,6 +61,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
 6. **跑 ctest 前把 CUDA bin 放进 PATH**（`E:\cuda-13.3\bin\x64`；`cudart64_13.dll` 只在那里，`bin\` 下没有）：
    否则多数用例以 **`0xC0000135`（STATUS_DLL_NOT_FOUND）** 失败，**而且可能表现为"先卡几分钟再失败"**（实测 `ninfer_hadamard_transform_test` 崩前挂了 550 s）。
    **这不是代码回归** —— 同一二进制带上 `bin\x64` 后 4/4 通过（2.31 s）。
+7. **A 档跑批（2026-10-07）留下的四条可复用判据**（都已在发布线二进制 `3B4103B4…` 上跑过；驱动器只做编排，不新造仪器）：
+   - **kMin 工作页阈值 = 4 页**：池 58/59（`free` 2/3）⇒ 工具答错；池 60/61（`free` 4/5）⇒ 答对（复用 `probe-kmin-sweep.ps1`，sink 固定 44 页）。**与 2026-10-05 独立一致**。
+   - **`NINFER_KV_SINK` 两份复刻同值**：`SINK=640` ⇒ 预算行 `skeleton=10`；`SINK=1920` ⇒ `skeleton=30`（若不等即为两份漂移）。
+   - **池页数 == 逻辑页数 ⇒ 环被关**：池 1024 页 + `--max-context 65536` ⇒ 日志里**没有** `[ring] budgets:` 行（若出现，说明判据或引擎行为变了）。
+   - **17920 交付档工具可见性**：池 280 页 + `SINK=2816` ⇒ 工具题必须答对（读同一探针的 `tool=` 列）。实测 **100%**。
 
 ## 3. 与白皮书的关系
 
