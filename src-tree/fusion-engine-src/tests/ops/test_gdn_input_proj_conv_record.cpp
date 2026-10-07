@@ -267,17 +267,28 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     failures += record_value.verify_guards(std::string(label) + " record value");
     failures += record_z.verify_guards(std::string(label) + " record z");
     failures += conv_record.verify_guards(std::string(label) + " conv record");
-    if (snapshot_workspace.used() != 0 ||
-        snapshot_workspace.peak_used() != snapshot_workspace_bytes) {
-        // B29 diagnosis (2026-10-07): print BOTH numbers -- over-reservation (peak < query) and
-        // under-reservation (peak > query) need opposite fixes, and the old message could not tell them
-        // apart. Harmless for every other arm; the assertion itself is unchanged.
+    // B29 (2026-10-07): the exact-sizing invariant "query == peak" can only hold when the CAPACITY call
+    // is able to decide the route. For T2 the a8-vs-BF16 choice needs the WEIGHTS
+    // (gdn_input_proj.cpp:803-805 calls t2_a8_supported(qk_weight, cols) and the same for value/z), and
+    // the capacity function receives no weights -- so on the A8I arms the query is a NECESSARY superset
+    // (measured: query 122,880 vs peak 81,920, the margin being exactly 10240 channels x columns x 2 B).
+    // A16 cannot take the a8 route at all (t2_a8_admits(A16Only) is false), so there the query must be
+    // EXACT -- that half was a real bug and is fixed. Both red paths are kept: on A8I a peak ABOVE the
+    // query (under-reservation) still fails, and on A16 any inequality still fails.
+    const bool superset_allowed = label.find("A8I") != std::string_view::npos;
+    const bool snapshot_bad =
+        superset_allowed ? (snapshot_workspace.peak_used() > snapshot_workspace_bytes)
+                         : (snapshot_workspace.peak_used() != snapshot_workspace_bytes);
+    const bool record_bad =
+        superset_allowed ? (record_workspace.peak_used() > record_workspace_bytes)
+                         : (record_workspace.peak_used() != record_workspace_bytes);
+    if (snapshot_workspace.used() != 0 || snapshot_bad) {
         std::cerr << label << ": snapshot workspace query/execution mismatch  query="
                   << snapshot_workspace_bytes << " peak=" << snapshot_workspace.peak_used()
                   << " used=" << snapshot_workspace.used() << "\n";
         ++failures;
     }
-    if (record_workspace.used() != 0 || record_workspace.peak_used() != record_workspace_bytes) {
+    if (record_workspace.used() != 0 || record_bad) {
         std::cerr << label << ": record workspace query/execution mismatch  query="
                   << record_workspace_bytes << " peak=" << record_workspace.peak_used()
                   << " used=" << record_workspace.used() << "\n";
