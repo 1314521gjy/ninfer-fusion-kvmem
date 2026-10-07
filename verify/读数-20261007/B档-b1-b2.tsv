@@ -1,0 +1,4 @@
+﻿"section"	"name"	"extra"	"ready"	"http"	"wall_s"	"ttft_s"	"output_tokens"	"decode_tok_s_DERIVED"	"pool"	"note"
+"B1"	"b1-base"	"--prefill-chunk 1024"	"1"	"200"	"0.51"	"367"	"8"	""	"2026-10-07 17:49:16.460  INFO  capacity | KV 262,144 tokens, bf16, explicit | pages 4,096/4,096 | runtime 16.5 GiB | free 8.65 GiB"	"decode rate is DERIVED: (output-1)/(wall-TTFT)"
+"B1"	"b1-all-three"	"--gdn-state-fp16 --prefill-chunk 256 --no-cuda-graph"	"1"	"200"	"0.59"	"448"	"8"	""	"2026-10-07 17:49:23.428  INFO  capacity | KV 262,144 tokens, bf16, explicit | pages 4,096/4,096 | runtime 16.2 GiB | free 8.93 GiB"	"decode rate is DERIVED: (output-1)/(wall-TTFT)"
+"B2"	"two-lanes-kvmem0"	"--max-concurrency 2"	"1"	"200/200"	""	"111"	""	""	"2026-10-07 17:49:31.079  INFO  capacity | KV 262,144 tokens, bf16, explicit | pages 4,096/8,192 | runtime 16.8 GiB | free 8.35 GiB"	"lane1_own_marker=True lane2_own_marker=True no_crosstalk=True"

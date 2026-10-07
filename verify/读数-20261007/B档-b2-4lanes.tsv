@@ -1,0 +1,2 @@
+﻿"section"	"name"	"extra"	"ready"	"http"	"wall_s"	"ttft_ms"	"output_tokens"	"decode_tok_s_DERIVED"	"pool"	"note"
+"B2"	"b2-4lanes-kvmem0"	"--max-concurrency 4"	"1"	"200/200/200/200"	""	"83.2"	""	""	"2026-10-07 18:37:30.746  INFO  capacity | KV 262,144 tokens, bf16, explicit | pages 4,096/16,384 | runtime 17.4 GiB | free 7.74 GiB"	"lanes=4 own_marker[lane1=True lane2=True lane3=True lane4=True] no_crosstalk=True after_health_http=200 engine_alive=True ; ttft_ms is the engine self-report of the LAST lane"
