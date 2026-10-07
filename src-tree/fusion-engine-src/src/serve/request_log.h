@@ -20,7 +20,11 @@ class logger;
 
 namespace ninfer::serve {
 
-inline constexpr int kRequestLogSchemaVersion        = 27;
+// 27 -> 28 (2026-10-08): the request_done record's "result" object gained the repetition telemetry
+// fields repeat_channel / repeat_tokens / repeat_uniq8 / repeat_dup8 / repeat_max8 (S6, B24 direction 3).
+// Additive only -- no existing key changed type or meaning -- but a consumer that pins this number is
+// exactly the consumer that needs to know the shape moved, so it moves with the shape.
+inline constexpr int kRequestLogSchemaVersion        = 28;
 inline constexpr const char* kRequestLogArtifactType = "ninfer_serve_request_log";
 
 struct ServerLogEnvironment {

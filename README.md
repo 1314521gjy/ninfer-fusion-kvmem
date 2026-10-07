@@ -218,8 +218,8 @@ cmake --build build-89-clean --target ninfer-serve -j 8
 | 跑 MTP + 想调并发（B10） | 显存预留与 `--max-concurrency` 互相挤：3090 上并发 4 时上下文上限 180,224 token，改成 1 后 262,144 可跑 ⇒ **先定并发，再定上下文** |
 | 小显存卡用错模型件（B15） | 必须 `…-mtponly.ninfer` + `--spec mtp`；拿带视觉头/别的头的件去跑会崩或起不来 |
 | 用 dflash2 当投机头（B18） | 其头质量明显低于 PQ2（接受率 22%/47% vs 91.5–100%），且**引擎不支持外挂 draft 模型** ⇒ 要高质量请用 PQ2 档的件 |
-| 8 GB 档想直接启动（B09） | 配方已量到单点（三杠杆 `--gdn-state-fp16` + `--prefill-chunk 256` + `--no-cuda-graph` = **−289.9 MiB**，见上"超池"行），但**池上限是外推**（取决于真机 `free`）⇒ 本仓**不附** `start-8g.bat`，请按真机 `free` 自定 `--kv-capacity` |
-| 其它已知边界（B20） | `--draft-tokens 10` 无产物证据 · A 卡与 V100（sm_70）不支持 · 树内留有一个 `device_profiles.json.bak-*` · 一条「仅设 `NINFER_KV_RING` 才崩」的反馈**未核** |
+| 8 GB 档想直接启动（B09） | 配方已量到单点（三杠杆 `--gdn-state-fp16` + `--prefill-chunk 256` + `--no-cuda-graph` = **−289.9 MiB**，见上"超池"行），但**池上限是外推**（取决于真机 `free`）⇒ 本仓**已附** `start-8g.bat`（入仓 `b924cdf`，就是上面「8 GB 卡请用仓根的 `start-8g.bat`」那一行说的那个文件）；真机 `free` 与本机不同时，请按实测自校 `--kv-capacity` |
+| 其它已知边界（B20） | `--draft-tokens 10` 无产物证据 · A 卡与 V100（sm_70）不支持 · 树内留有一个 `device_profiles.json.bak-*` · 一条「仅设 `NINFER_KV_RING` 才崩」的反馈**已核、属实、已修** —— 环的两道门读的不是同一个环境变量，照引擎自己的提示操作必崩，见 **B30** |
 
 更多症状与绕道见 [排错手册](docs/02-排错手册%20·%20预案与处方.md)、[已知问题与禁忌](docs/05-已知问题与禁忌.md)和 [Bug 手册](docs/06-Bug手册.md)。部分 `docs/` 文档来自特定历史部署包，端口、模型名、容量和本机路径应按对应版本核对。
 
