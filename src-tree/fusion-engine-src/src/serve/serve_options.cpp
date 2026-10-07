@@ -309,6 +309,7 @@ std::string serve_usage_text(const char* argv0) {
            "  --top-k N                     0..20\n"
            "  --min-p F                     0..1\n"
            "  --presence-penalty F          -2..2\n"
+           "  --thinking-presence-penalty F -2..2 (thinking channel only; unset = off)\n"
            "  --frequency-penalty F         -2..2\n"
            "  --seed N                      seed of a request that sets none (default: fresh\n"
            "                                per request)\n"
@@ -683,6 +684,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--presence-penalty") {
             options.sampling_overrides.presence_penalty = parse_float_in(
                 require_value("--presence-penalty"), "presence-penalty", -2.0f, 2.0f);
+        } else if (arg == "--thinking-presence-penalty") {
+            // S2: thinking-channel-only presence penalty (see serve_options.h).
+            options.thinking_presence_penalty = parse_float_in(
+                require_value("--thinking-presence-penalty"), "thinking-presence-penalty", -2.0f,
+                2.0f);
         } else if (arg == "--frequency-penalty") {
             options.sampling_overrides.frequency_penalty = parse_float_in(
                 require_value("--frequency-penalty"), "frequency-penalty", -2.0f, 2.0f);

@@ -105,6 +105,13 @@ struct ServeOptions {
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;
     std::optional<std::uint32_t> default_thinking_budget;
+    // S2 (issue #3, reported 2026-10-05; landed 2026-10-07): a SEPARATE presence penalty for the
+    // thinking channel. F4 (thinking wants presence ~1.0..1.5 to break recursion) and L1 (tool
+    // scenarios want a global presence of 0 to avoid XML leakage) conflict on one knob; this one only
+    // replaces the presence penalty while a request is in thinking mode, so the NonThinking/tool
+    // channel keeps the global value. Unset => the resolved sampling overrides are left untouched
+    // (byte-identical to before this change).
+    std::optional<float> thinking_presence_penalty;
     // Effort for requests that name none; a request that disables thinking is left alone.
     std::optional<RequestedReasoningEffort> default_reasoning_effort;
     // End-of-thinking message fed to the model when it hits the thinking budget; empty

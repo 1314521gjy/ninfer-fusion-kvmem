@@ -428,6 +428,14 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
             request.thinking_budget ? request.thinking_budget : server.default_thinking_budget;
     }
     options.execution.sampling             = resolve_sampling_overrides(request.sampling, server);
+    // S2 (issue #3, landed 2026-10-07): the thinking channel gets its own presence penalty. The
+    // injection point is AFTER resolve_sampling_overrides on purpose: a server-side
+    // `--presence-penalty 0` is an explicit override (sampling.cpp: overrides.value_or(preset)), so it
+    // would otherwise swallow any preset the frontend resolved. Only requests that are actually in
+    // thinking mode are touched -- the NonThinking/tool channel keeps the global value.
+    if (semantics.enable_thinking != false && server.thinking_presence_penalty.has_value()) {
+        options.execution.sampling.presence_penalty = *server.thinking_presence_penalty;
+    }
     options.execution.post_thinking_sampling =
         resolve_post_thinking_overrides(request.post_thinking, server);
     options.execution.first_token_top_logprobs = request.first_token_top_logprobs;

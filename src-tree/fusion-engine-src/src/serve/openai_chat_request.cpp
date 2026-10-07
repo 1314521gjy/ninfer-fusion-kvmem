@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -943,6 +944,43 @@ void parse_reasoning_effort(const Json& body, GenerationRequest& output) {
     output.reasoning_effort = *parsed;
 }
 
+// S3 (issue #3, reported 2026-10-05; landed 2026-10-07): the per-request thinking budget pipeline
+// already existed (request.h:209 field, translate.cpp:428 consumption with default_thinking_budget
+// fallback, engine execution layer) and the ANTHROPIC route already parsed it
+// (anthropic_messages_request.cpp:883) -- only the OpenAI route was missing the JSON parse, i.e. the
+// two routes were asymmetric. Contract (as reported and verified against the Anthropic route):
+// non-negative integer or null; 0 and null both mean "not set"; an explicit value is floored at 1024
+// (the Anthropic route's floor); anything outside uint32 is rejected. Absent field => untouched, so
+// existing clients stay byte-identical.
+void parse_thinking_budget(const Json& body, GenerationRequest& output) {
+    if (!body.contains("thinking_budget") || body.at("thinking_budget").is_null()) { return; }
+    const Json& value = body.at("thinking_budget");
+    if (!value.is_number_integer()) {
+        bad_request("thinking_budget must be a non-negative integer or null", "thinking_budget");
+    }
+    if (value.is_number_unsigned()) {
+        const std::uint64_t parsed = value.get<std::uint64_t>();
+        if (parsed > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            bad_request("thinking_budget is out of range", "thinking_budget");
+        }
+        if (parsed == 0U) { return; }
+        if (parsed < 1024U) {
+            bad_request("thinking_budget must be at least 1024 when set", "thinking_budget");
+        }
+        output.thinking_budget = static_cast<std::uint32_t>(parsed);
+        return;
+    }
+    const std::int64_t parsed = value.get<std::int64_t>();
+    if (parsed < 0) {
+        bad_request("thinking_budget must be a non-negative integer or null", "thinking_budget");
+    }
+    if (parsed == 0) { return; }
+    if (parsed < 1024) {
+        bad_request("thinking_budget must be at least 1024 when set", "thinking_budget");
+    }
+    output.thinking_budget = static_cast<std::uint32_t>(parsed);
+}
+
 void parse_stream_options(const Json& body, OpenAIChatRequest& output) {
     output.stream = get_bool(body, "stream", false);
     if (!body.contains("stream_options") || body.at("stream_options").is_null()) { return; }
@@ -1015,6 +1053,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);
+    parse_thinking_budget(body, output.generation);
     const TemplateOptions template_options      = parse_template_options(body);
     output.generation.enable_thinking           = template_options.enable_thinking;
     output.generation.preserve_thinking         = template_options.preserve_thinking;
