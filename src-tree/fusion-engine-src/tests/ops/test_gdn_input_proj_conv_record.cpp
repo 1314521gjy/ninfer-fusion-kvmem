@@ -269,11 +269,18 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     failures += conv_record.verify_guards(std::string(label) + " conv record");
     if (snapshot_workspace.used() != 0 ||
         snapshot_workspace.peak_used() != snapshot_workspace_bytes) {
-        std::cerr << label << ": snapshot workspace query/execution mismatch\n";
+        // B29 diagnosis (2026-10-07): print BOTH numbers -- over-reservation (peak < query) and
+        // under-reservation (peak > query) need opposite fixes, and the old message could not tell them
+        // apart. Harmless for every other arm; the assertion itself is unchanged.
+        std::cerr << label << ": snapshot workspace query/execution mismatch  query="
+                  << snapshot_workspace_bytes << " peak=" << snapshot_workspace.peak_used()
+                  << " used=" << snapshot_workspace.used() << "\n";
         ++failures;
     }
     if (record_workspace.used() != 0 || record_workspace.peak_used() != record_workspace_bytes) {
-        std::cerr << label << ": record workspace query/execution mismatch\n";
+        std::cerr << label << ": record workspace query/execution mismatch  query="
+                  << record_workspace_bytes << " peak=" << record_workspace.peak_used()
+                  << " used=" << record_workspace.used() << "\n";
         ++failures;
     }
     return failures;
