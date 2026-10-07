@@ -63,6 +63,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
    **这不是代码回归** —— 同一二进制带上 `bin\x64` 后 4/4 通过（2.31 s）。
 7. **A 档跑批（2026-10-07）留下的四条可复用判据**（都已在发布线二进制 `3B4103B4…` 上跑过；驱动器只做编排，不新造仪器）：
    - **kMin 工作页判据 = `pool − sink ≥ 16` 页**：池 58/59（`free` 2/3）⇒ 工具答错；池 60/61（`free` 4/5）⇒ 答对（复用 `probe-kmin-sweep.ps1`，sink 固定 44 页）。**⚠️ 2026-10-07 深夜更正**：不要写成"`free ≥ 4`"——`free` 只是**分给检索预算后的余数**；把 `RETRIEVE` 提到 1536 后 `free` **恒为 0** 而池 60 仍答对 ⇒ 控制量是 `pool − sink`（三组 × 三点边界一致在 16 页；`RETRIEVE`/`SHARE` 都不移动它）。**怎么变红**：若 `pool − sink = 15` 就答对、或 `= 16` 仍答错，则阈值不是 16。
+   - ⛔ **2026-10-07 19:0x 再更正：`pool − sink ≥ 16` 页这条也被证伪 —— 控制量其实是"池装得下整个题面"（`prompt ≤ pool`）**。那三个"16 页"是**固定题面 3,923 token + 固定 sink 44 页**下的巧合。判据（`probe-kmin-sweep.ps1`，新增 `-FillerLines` 把题面按比例放大）：
+
+     | 臂 | 池 | 题面真值（引擎自报） | `pool − sink` | 工具题 |
+     |---|---|---|---|---|
+     | A 对照 | 60 页 | 3,923 token（62 页） | 16 | **答对** |
+     | B 判别 | 60 页 | **7,563 token（119 页）** | **16** | **答错** |
+     | D | 62 页 | 7,563 token（119 页） | **18** | **答错** |
+     | C | 120 页 | 7,563 token（119 页） | 76 | **答对** |
+
+     ⇒ slack 16 / 18 都会答错 ⇒ slack 不是控制量。**引擎自己把条件写在告警行里**（逐字）：`prompt exceeds the resident Device KV pool: prompt 7563 tokens (119 pages) > pool 3840 tokens (60 pages) … raise --kv-capacity to at least the prompt's token count (measured: prompt >= pool is the condition that reproduces it)`。
+     **⇒ 该用什么当判据**：① 启动守卫只管网**结构**（`sink + 工作页 ≤ pool`，已修，见 B21）；② **每请求**的判据是**那行 over-pool 告警**（题面 > 池 ⇒ 中段可能无声丢失、答案按未核对待），**不是**固定页数的松弛量；③ 先前"守卫欠保护 12 页、应改成 16"的推论**作废**。⚠️ 注意 A 臂也是 over-pool（3,923 > 3,840）却答对 ⇒ **告警 ≠ 必错**。
    - **`NINFER_KV_SINK` 两份复刻同值**：`SINK=640` ⇒ 预算行 `skeleton=10`；`SINK=1920` ⇒ `skeleton=30`（若不等即为两份漂移）。
    - **池页数 == 逻辑页数 ⇒ 环被关**：池 1024 页 + `--max-context 65536` ⇒ 日志里**没有** `[ring] budgets:` 行（若出现，说明判据或引擎行为变了）。
    - **17920 交付档工具可见性**：池 280 页 + `SINK=2816` ⇒ 工具题必须答对（读同一探针的 `tool=` 列）。实测 **100%**。
