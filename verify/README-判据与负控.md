@@ -41,6 +41,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
    `} else if (parse_dispatch_options(arg)) { }` 结束，**没有 else-throw**，全文件只有 `--help` 与 `argv[1]` 两处校验。
    ⇒ 每个开关都要对源码核实，并抓服务器**自报字段**反证它生效了（`INFO capacity | KV <N> tokens, <dtype>, explicit | pages X/Y`）；
    本机就踩过：脚本里传的 `--no-kv-lease-growth` **在本树不存在**，被静默吞掉，而那一跑看起来是"成功"的。
+   ⭕ **2026-10-07 复核：本条的前提不成立（实测证伪）** —— 引擎**会拒绝**未知开关：那个
+   `parse_dispatch_options` lambda **自己**以 `else { throw std::invalid_argument("unknown argument: " + arg); }`
+   结束（`serve_options.cpp:709-711`）。四臂实测（本仓件与出厂件）：`--definitely-not-a-flag`、
+   `--no-kv-lease-growth`、`--vram-reserve-mib` **全部** `unknown argument: X` + **exit 1** + usage 全文；
+   对照臂「不给开关」引擎继续往下走 ⇒ 两态可区分。**同一事实在 `docs/02-排错手册`（§1 表）
+   与 `docs/08-从零复现兜底` 里记的就是正确行为**（`unknown argument: --disk-cache` ⇒ 删掉它）。
+   **本条里仍然成立的**：① 要抓服务器自报字段反证配置生效（这永远成立）；② 别的批（F2 之后）的启动器
+   参数**照抄到本树会启动即拒**（`--no-kv-lease-growth` 只有肯定式的 `--kv-lease-growth`，默认 `false`）。
 
 ## 3. 与白皮书的关系
 

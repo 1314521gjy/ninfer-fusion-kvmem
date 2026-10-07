@@ -83,11 +83,26 @@ inline bool kvmem_score_enabled() noexcept {
     return on;
 }
 
+// 数值旋钮的读法：**0 与负数一律当"未设"**。这是刻意口径，不是疏漏 ——
+// 例如 QUERY_TAIL 给 0 会让打分窗口变空、"默默什么都不打"，比回落默认值危险得多
+// （见 accumulate 里那段 "未设/0 ⇒ 64 更安全" 的注释）。
+// ⚠️ 布尔开关**不要**用它：`=0` 在这里被读成"未设"⇒ 回落成默认值 ⇒ 负控永不生效（B25）。
+// 布尔开关一律用下面的 kvmem_score_env_flag()。
 inline std::int32_t kvmem_score_env_i32(const char* name, std::int32_t fallback) noexcept {
     const char* v = std::getenv(name);
     if (v == nullptr || v[0] == '\0') { return fallback; }
     const long parsed = std::strtol(v, nullptr, 10);
     return parsed > 0 ? static_cast<std::int32_t>(parsed) : fallback;
+}
+
+// 布尔开关的读法：**设了就用** —— `=0` 就是关、`=非0` 就是开，只有"未设/空串"才回落 fallback。
+// 存在的理由（B25，2026-10-07 实测）：`NINFER_TERNARY_KVMEM_SCORE_SPAN_SEGMENT=0` 是本改动
+// **文档化的负控**，但它若走 kvmem_score_env_i32，0 会被当成"未设"⇒ 回落 1 ⇒ 该负控永不生效、
+// 与其配对的 "skip long query span" 分支不可达（实测：三条臂上正控/负控逐行同值）。
+inline bool kvmem_score_env_flag(const char* name, bool fallback) noexcept {
+    const char* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') { return fallback; }
+    return std::strtol(v, nullptr, 10) != 0;
 }
 
 // ---- 探针状态（进程级单例，与 mean-K 索引同寿命）---------------------------------------------
@@ -315,7 +330,7 @@ inline void kvmem_score_accumulate(std::int32_t fidx, const void* q, std::int32_
     //   · 只有 span 本身 ≤ MAXQ（真正的"问句跨度"）才旁路尾窗规则 —— 那才是这条改动的用武之地。
     const bool abs_span_known = p.abs_query_begin >= 0 && p.abs_query_end > p.abs_query_begin &&
                                 p.abs_chunk_begin >= 0 && chunk_tokens > 0 &&
-                                kvmem_score_env_i32("NINFER_TERNARY_KVMEM_SCORE_SPAN_OFF", 0) == 0;
+                                !kvmem_score_env_flag("NINFER_TERNARY_KVMEM_SCORE_SPAN_OFF", false);
     bool span_applied = false;
     if (abs_span_known) {
         const std::int32_t local_begin = p.abs_query_begin - p.abs_chunk_begin;
@@ -367,7 +382,10 @@ inline void kvmem_score_accumulate(std::int32_t fidx, const void* q, std::int32_
     //     message is where the filler D-12 blamed lives (measured: widening the query from 64 to 256
     //     tokens cost turn2 6/6 -> 2/6 at pool 4000);
     //   * SCORE_SPAN_SEGMENT=0 restores the skip, which is also this change's negative control.
-    const bool segment_span     = kvmem_score_env_i32("NINFER_TERNARY_KVMEM_SCORE_SPAN_SEGMENT", 1) != 0;
+    //     ⚠️ 这个开关**必须**走 kvmem_score_env_flag（不是 env_i32）：后者把 `=0` 读成"未设"⇒
+    //     回落成 1 ⇒ 这条负控曾经**永不生效**、下面的 skip 分支不可达（B25，2026-10-07 实测：
+    //     三条臂上正控与负控的读数逐行同值）。改回 env_i32 就会把这条负控重新废掉。
+    const bool segment_span     = kvmem_score_env_flag("NINFER_TERNARY_KVMEM_SCORE_SPAN_SEGMENT", true);
     const std::int32_t span_max = kvmem_score_env_i32("NINFER_TERNARY_KVMEM_SCORE_SPAN_MAX", 4096);
     if (span_tokens > maxq) {
         if (!segment_span || maxq <= 0) {
