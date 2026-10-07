@@ -1,239 +1,246 @@
----
-license: apache-2.0
-language:
-  - zh
-  - en
-tags:
-  - ninfer
-  - kv-cache
-  - kvmem
-  - content-retrieval
-  - paged-attention
-  - prefix-cache
-  - host-offload
-  - long-context
-  - inference-engine
-  - cuda
-  - sm-89
-  - ada
-  - windows
-  - quantization
-  - speculative-decoding
-  - reproduction
----
+# NInfer Fusion KVMem
 
-# NInfer · 小显存长上下文（KVMem 环 + host-backed 复用）· 复现白皮书与引擎侧改动
+**面向 Windows / NVIDIA GPU 的长上下文推理实验：用 KVMem 环、主机 KV 存储与按需检索，让设备 KV 池可以小于逻辑上下文，并在后续轮次复用已有上下文。**
 
-> **本仓是上游 NInfer 的下游衍生（downstream derivative），不是上游官方仓**；上游出处、许可与逐文件改动量见 [`NOTICE.md`](NOTICE.md) §1 与本站的"我方工作"一节。
+本项目基于 NInfer `0.11.0-rtx3090`，发布融合后的源码、复现记录和验证工具。它是 NInfer 的**下游衍生项目**；基座与第三方算法来源见 [署名与改动声明](NOTICE.md)。
 
-> # ⚠ 初期版本 · 含大量未解决 bug
->
-> 本仓是**融合引擎的初期版本源码**：能启动、能出结果，但**不保证正确性与稳定性**；**不建议进行商用，仅可进行个人使用和探索**（源码许可仍是 Apache-2.0，见 `LICENSE`；这是使用建议，不是许可附加条款）。
->
-> **Bug 账本**（B01–B20，合并本机实测 / 代码自述 / B 站社区反馈，去重后按重要性排序、**只列未关闭项**）见 `已知问题-初期版本.md`。
+> [!WARNING]
+> 这是初期实验版本，仍有未定位问题，不保证回答正确性与运行稳定性。维护者建议用于个人探索，不建议用于商用；该建议不改变 [Apache-2.0 许可](LICENSE)。使用前请读 [Bug 账本及状态复核](已知问题-初期版本.md)。
 
-> ## ⚠️ 发布声明（请先读）
->
-> | | |
-> |---|---|
-> | ✅ **发布** | **复现白皮书**（`复现白皮书-NInfer-KVMem环-20261002.md`）· 引擎侧源码改动（`patches/`）· 技术文档（`docs/`）· 自建工具（`tools/`）· 判据脚本（`verify/`）|
-> | ❌ **不发布** | **任何模型权重**，以及由权重派生的 `.ninfer` 制品（**引擎二进制已改为通过 GitHub Release 提供**；CUDA/FFmpeg 运行库不在本仓）|
-> | 🧱 **基线** | 上游 **NInfer**（Apache-2.0）源码树，`VERSION = 0.11.0-rtx3090` —— `patches/` 是针对它写的 |
-> | 📄 **许可** | 本仓内容为 **Apache License 2.0**（**不覆盖**权重）；第三方署名与证据见 [`NOTICE.md`](NOTICE.md) |
-> | 🐙 **GitHub 仓** | <https://github.com/1314521gjy/ninfer-fusion-kvmem>（源码 + Release 二进制）|
+[获取引擎](https://github.com/1314521gjy/ninfer-fusion-kvmem/releases) · [编译指南](编译指南-怎么编.md) · [复现白皮书](复现白皮书-NInfer-KVMem环-20261002.md) · [实测回执](实测回执与反馈.md) · [问题反馈](https://github.com/1314521gjy/ninfer-fusion-kvmem/issues)
 
----
+## 这个项目做了什么
 
-> **引擎源码树（整棵）在 src-tree/fusion-engine-src/**；我方改动逐文件在 patches/changed-files/。
->
-> 这是**融合引擎**源码（NInfer v0.11.0 上游 + 我方改动整合），**不是上游 `master` 原树**；上游出处见 `NOTICE.md`，我方改动逐文件见 `patches/changed-files/`。
->
-> 启动崩溃 x18c729 的根因与修法见 根因与修法-0x18c729-20261003.md。
+长上下文会增加 KV 缓存占用。本项目将三个容量分别配置：
 
-## 0. 我方工作与贡献（先看这条）
-
-本仓是**融合引擎**（NInfer-all 基座 + 我方引擎线工作）的源码与复现记录。逐文件 SHA256 比对上游基线：
-**2,327 件逐字节相同、92 件为我方修改、44 件为我方新增、0 件缺失**（复算脚本 `verify/reconcile-vs-upstream.ps1`，清单 `patches/changed-files.txt`）。
-
-我方做的工作，按类别列全：
-
-1. **KVMem 环（新增 `src/ops/kvmem/` 44 件 + 相关改动）**：让"设备池 < 逻辑上下文"成为合法配置 ——
-   内容打分选页 → 降到主机 KV → 映射回设备 → 隐藏页装掩码 → 按需搬回。
-   落点：`src/ops/kvmem/`（`kvmem_score.h`、`kvmem_select.*`、`kvmem_retrieve*`、`kvmem_window_assembly.*`、
-   `mean_k_index*`、`raw_k_shadow*`、`kvmem_port_bridge.*`）与 `program/storage/context.cpp`、`core/paged_kv_cache.*`。
-2. **host-backed 复用 + 惰性领用**：设备池装不下的检查点整段登记、按需物化（`transactions/capture.cpp`、
-   `planning/pressure.cpp`、`transactions/materialization.cpp`）。
-3. **定容与不变量**：`host_pages + pool_pages >= logical_pages`；页 = 64 token；池页 = 窗口/64 + prefill 块/64 + 8 松弛；
-   装不下就在启动期拒绝并报出所需页数（`planning/startup.cpp`）。
-4. **低显存池实验**：显存池 4,000 token（63 页）下，多针题面第 1 轮 6/6、第 2 轮 6/6；
-   红控 `TAIL=256` 第 2 轮掉到 2/6 —— 判据能变红。
-5. **长题验证**：94,698 token（窗口的 23.5 倍）3/3 + 3/3；命中不稳的反例同样留档（见 `已知问题-初期版本.md`）。
-6. **门禁与消融**：17,920 组门禁臂全绿（含 `noretr` 0/6 负控）；SHARE=25 预算下 A/B：词法选页 4/6 vs 内容打分 6/6。
-7. **启动崩溃 0x18c729 的根因定位与修法**（30 / 50 系）：混合时期 obj 导致 `GenerationService` 跨编译单元布局不一致；
-   改为每架构空目录清编，三支件哈希见 `根因与修法-0x18c729-20261003.md`。
-8. **启动期可观测与降级**：构造期逐步日志；core 构造失败自动回退普通 core 继续服务，不再裸崩溃。
-9. **量化与内核线**：PTQ1 / GSQ 档位的 T2 内核与派发改动（`src/ops/linear/t2/`、`softmax_attention/dense/causal_cache/` 等）。
-10. **速度口径与实测**：PTQ1（mtp）194.6–196.8 tok/s；PQ2（dflash2, draft 12）571.9 tok/s / 2.2 s。
-11. **交付工具**：按卡选引擎（`pick-engine.bat`）、套件自检、模型件自检、部署模拟、哈希门禁。
-
-**要自己编？** → `编译指南-怎么编.md`：工具链版本（CUDA 13.3 / MSVC BuildTools / vcpkg 清单依赖 / 驱动 ≥580）、逐架构的 `cmake` 命令行、三条硬规矩（一架构一空目录 · 编译不需要模型 · 首次 1–2 小时）与常见编不过的原因。
-
-**实测回执与反馈**（群内真机 + 本机读数，全部带日期与出处）→ `实测回执与反馈.md`：显存池 4,000 token 跑 96K 上下文命中 6/6 + 6/6（红控掉到 2/6）、94,698 token 长题 3/3 + 3/3、解码峰值 571.9 tok/s、群内 RTX 5080 上 104,991 token 题面命中中段针。
-
-**与上游的逐项对账**（上游完全没有、本树有的能力；已解决的问题与判据）→ `我方-新增能力与已解决问题.md`：
-命令行开关我方多 17 个、环境变量多 39 个、上游 0 个开关被我方删除；`kvmem`/`t2_ptq1` 关键词在上游命中 **0** 个文件。
-
-**上游与许可（如实说，逐条带判据）**：引擎基座是上游 NInfer-all（Apache-2.0，2,327 件逐字节相同）；
-树里**确实含他人代码**，逐文件清单在 `NOTICE.md` §2.1：`kvmem-qw3` 8 件（Di Chai，Apache-2.0，我方改造版，头部带 `PORTED` 声明，许可与 notices 逐字节随树）；
-`tancau/ninfer-kvmem-ring` 4 件逐字节相同（Apache-2.0）+ 65 件共用改动面；`CraneBW` / `laamaafung` 线是 `kvmem_resident_pages` 定池做法的**语义参照**（出处注释随源码）—— **未并入其代码，不构成再分发、不触发其许可义务**。
-上面 §0 的 1–11 条是在这些基础之上**我方做的事情**（移植、接入、改造、定容、实验、修崩溃、打包）—— 两件事分开看，互不抵消。
-
----
-
-## 1. 这个仓解决什么问题
-
-一句话：**让"显存很小"和"上下文很长"不再互相打架，而且每一轮不必把上下文重填一遍。**
-
-引擎原本的不变量是「KV 设备池 == 逻辑上下文 == 提示上限」。本仓的改动把它拆开：
-
-| 改成了什么 | 判据（实测读数，口径见白皮书 §9）|
-|---|---|
-| **设备池 ≪ 逻辑上下文**（池 280 页 = 17,920 token，逻辑上限 262,144）| 启动行 `capacity \| KV 17,920 tokens, k8v4, explicit \| pages 280/4,096` |
-| **小池也不答错**（池 4,000 token = 63 页，题面 42k）| 多针 turn1 **6/6** + turn2 **6/6**；同支二进制把检索窗口改回 256 行 ⇒ turn2 **2/6**（红控） |
-| **长题面照样答对**（超池 23.5×）| 94.7k 题面 + 63 页池 ⇒ 两轮 **3/3 + 3/3**，零静默错 —— ⚠️ **只在"显式 `QUERY_TAIL=64` + 打分确认在跑"的那条臂上成立**；同日另有一条"不设 env"的同形臂读到 `hit=0 / SILENT_WRONG=2`，**未定论**，反例与边界见白皮书 §9.1b |
-| **每一轮不全量重填**（同会话追问）| 第二轮 **复用 100%（cache 80,075）**，TTFT **70,829 ms → 126.5 ms** |
-| **按卡自适应**（同一支二进制按卡选调度）| 启动行 `device profile <class>: N routed keys`；`--device-profile auto/off/calibrate` |
-
-**这不是"显存优化技巧"**：池变小是因为**工作集**变小（常驻窗口 + 一个预填块），装不下的页走宿主层、
-按需搬回 —— 机制、公式与判据见白皮书 §2–§3 与 `docs/01-部署与编译总白皮书.md` §6。
-
----
-
-## 2. 目录
-
-```
-复现白皮书-NInfer-KVMem环-20261002.md   ★★ 第一入口：机制 / 复现步骤 / 判据与负控 / 实测读数 / 协议署名
-README.md                               本页
-NOTICE.md                               署名、许可与我方改动声明（协议层权威）
-LICENSE                                 Apache License 2.0（仅覆盖本仓内容）
-patches/                                我们对上游引擎的改动（38 个源文件 + 逐文件说明）
-  README-改动说明.md                    ← 基线、判据、按主题分类、诚实清单（做改动的人先读这个）
-  changed-files/                        改动后的完整文件，路径与引擎源码树一一对应
-  changed-source.txt                    38 行，机器可读
-  changed-files.txt                     136 条（M 92 + A 44），逐文件对账原始清单
-docs/                                   对外口径的技术文档
-  00-三档口径与读数.md                   实测读数：速度 / 显存 / 长上下文复用
-  01-部署与编译总白皮书.md                从零到出包：配置项逐条、构建、ring 五开关、验收判据
-  02-排错手册 · 预案与处方.md             症状 → 判据 → 处方
-  03-基础部署后的调优方案.md              三个旋钮（窗口 / 检索 / 宿主层）与"改完怎么验"
-  04-卡死与循环的防治.md                  ★ 空交付 / 固定点 / 半截 / 平台守卫：为什么必须在平台层拦、怎么拦
-  05-已知问题与禁忌.md                   ★ 照用会炸的那几条（每条带读数）
-  06-Bug手册.md                          ★ 未解决 / 已修但老包还带 / 绕法 / 红线
-  08-从零复现兜底.md                     只想起服务、不想编
-  09-声明与链接.md                       第三方清单 / 许可 / 证据（协议层索引）
-  11-按卡差异速查.md                     档位表（逐字取自引擎 device_profiles.json）与架构边界
-  12-给接收方-agent-的操作手册.md         ★★ 接手部署的 agent 看的顺序清单
-  判据.txt                               就绪判据的形状（日志逐字）
-  docs/方案/                             我方自研路线的评估与立项（内部视角，含本机路径）
-tools/                                  自建工具（都不依赖引擎，读文件即可用）
-  peek_container.py                      读 .ninfer v3 容器布局（头 / 清单 / 组件 / 载荷）
-  component_bytes.py                     按组件算字节账
-  check_strip.py                         装载安全性闸：uses 有没有被饿死（引擎免跑）
-  check_refs.py                          目录 JSON 的引用完整性（悬空对象 id 只在引擎里才炸）
-  strip_components.py                    重打包容器：去掉某些组件（用上游 writer，布局重算）
-  自检-模型件.ps1                        ★ 模型体检：完整性 + 带什么投机头 + 你这张卡该用哪个 --spec
-  kit-sha256sums.ps1                     包校验清单增量生成（只重算变了的文件）
-  smoke-mtponly.ps1                      起-问-复用的冒烟（含"答案退化"与"第二轮 cache≥90%"两道判据）
-verify/                                 判据脚本（每个都有"怎么变红"的负控，见白皮书 §10）
-  gate-内测包-清单与形状.ps1              包清单双向校验 + 引擎/DLL/启动器形状（PQ2 档）
-  gate-ptq1档-清单与形状.ps1             同上，PTQ1 档
-  自检-引擎与卡匹配.ps1                   本机卡能不能跑这个包（架构边界）
-  verify-arch-engine.ps1                 本卡验收：起服务 + 过池告警臂 + 题面中段针
-  verify-kit-manifest.ps1                清单逐文件校验
-  README-判据与负控.md                        ★ 本目录入口：每个脚本「怎么变红」的负控说明
-  capability-diff-vs-upstream.py         与上游基线算能力差集（`我方-新增能力与已解决问题.md` 的复算脚本）
-  reconcile-vs-upstream.ps1              与上游基线逐文件 SHA256 对账（identical/modified/added/missing）
-```
-
----
-
-## 3. 四条技术线（这个仓的全部内容）
-
-| 线 | 做了什么 | 落在哪 |
+| 配置 | 含义 | 示例 |
 |---|---|---|
-| **A. 存储解耦** | 「设备池 == 逻辑上下文」这条不变量拆开：池按工作集定、溢出的页进宿主层、按需搬回 | `patches/changed-files/src/core/paged_kv_cache.*`、`…/program/storage/*`、`…/state/decoder_state.*` |
-| **B. host-backed 复用 + 惰性领用** | 池装不下的检查点**整段登记、按需物化** ⇒ 长题面的第二轮照样复用 | `…/program/transactions/{capture,materialization}.cpp`、`…/program/planning/pressure.cpp` |
-| **C. 按卡自适应档位** | 同一支二进制按「硬件类 + SM 数」自动选实测最优调度；`off` 一条命令逐位等价回退 | `…/runtime/engine/device_profiles.json`、`…/serve/serve_options.cpp` |
-| **D. 内容检索与查询窗口** | 页按**内容相关性**排序搬回（而非词法/先进先出）；检索查询 = **当前问题的 token span**（默认 64 行）；打分**默认开**且可显式关闭做负控 | `patches/changed-files/src/ops/kvmem/*`、`…/models/qwen3_5/execution/*`、`…/program/prefill.cpp`、`…/frontend/*`、`…/serve/*` |
+| `--max-context` | 单序列的逻辑上下文上限 | 262,144 token |
+| `--kv-capacity` | 设备端 KV 池容量 | 17,920 token（280 页） |
+| `--host-kv-mib` | 主机端 KV 存储预算 | 16,384 MiB |
 
----
+KVMem 环保留常驻窗口，将其他页降到主机层；需要时按内容相关性选页、搬回设备并装配注意力窗口。host-backed 复用与惰性物化让后续轮次可以继续使用主机驻留的检查点。按卡档位则为内核调度选择路由。
 
-## 4. 怎么用
+**小 KV 池不代表模型权重也能装进小显存**，也不代表检索与完整注意力在任意任务上质量等价。模型权重、运行工作区、投机头、CUDA Graph 和主机内存都需要单独预算。机制、容量公式与负控见 [白皮书](复现白皮书-NInfer-KVMem环-20261002.md) §2–§4。
 
-### 4.1 想复现（推荐从这里开始）
-读 **`复现白皮书-NInfer-KVMem环-20261002.md`**：§8 是逐字复现步骤（取基线 → 覆盖 → 构建 → 起服务 → 验收 → 短测），
-§10 是每条结论的判据与负控，§9 是实测读数。
+## 从哪里开始
 
-### 4.2 想做引擎侧改动
-1. 取上游 **NInfer**（Apache-2.0）源码树，基线 `VERSION = 0.11.0-rtx3090`；
-2. 把 `patches/changed-files/` 里的文件**按同名路径覆盖**上去；
-3. 编译（工具链口径见白皮书 §8.2 与 `docs/01`）；**这一步我们只在自己机器上验过**（见 §6）。
+| 你的目标 | 入口 |
+|---|---|
+| 先试运行服务 | 下方“获取与启动”；先准备引擎、依赖和模型 |
+| 自己编译或修改引擎 | [编译指南](编译指南-怎么编.md)与 [完整源码树](src-tree/fusion-engine-src/) |
+| 重跑长上下文与复用实验 | [复现白皮书](复现白皮书-NInfer-KVMem环-20261002.md) §8–§10、[验证脚本说明](verify/README-判据与负控.md) |
+| 看实测结果和反例 | [实测回执](实测回执与反馈.md)、[Bug 账本](已知问题-初期版本.md) |
+| 核对项目贡献与第三方来源 | [新增能力与已解决问题](我方-新增能力与已解决问题.md)、[NOTICE](NOTICE.md) |
 
-### 4.3 只想把服务跑起来
-看 **`docs/12-给接收方-agent-的操作手册.md`**（第一入口）与 `docs/08`。
-⚠️ 本仓**不含引擎二进制**，你需要另有一份构建产物。
+## 获取与启动
 
-### 4.4 只想读结论
-白皮书 §0 / §9 → `docs/05`（禁忌）→ `docs/04`（思考循环）三处就够。
+### 1. 准备引擎、依赖与模型
 
----
+源码可以直接克隆；运行引擎和模型时，使用纯 ASCII 路径，例如 `D:\ninfer\`，避免已记录的中文路径读取问题。
 
-## 5. 最短验收清单（照用）
-
-```
-1) 起服务必须看到三行：
-   [ring] content scoring ON by default (the ring is configured): …
-   INFO  engine ready | <model> | total <N>s | weights <X> GiB
-   INFO  capacity | KV 17,920 tokens, k8v4, explicit | pages 280/4,096 | runtime <X> GiB | free <Y> GiB
-2) 发过请求后必须有 ≥1 行：kvmem_score: SELECT label=text_prefill_chunk … query_tokens=64
-   （题面小于窗口时本来就不产生 SELECT —— 那不是故障；超窗却没有 SELECT 才是故障）
-3) 一条"数数字"短测（1000 进 / 1000 出），去引擎控制台读：
-   req#1 done … TTFT <N> ms | total <N>s | prefill <N> tok/s | decode <N> tok/s
-4) 小池臂的负控：把检索窗口改回 256 行 ⇒ 小池多针 turn2 必须掉下来（否则说明判据测不出东西）
+```powershell
+git clone https://github.com/1314521gjy/ninfer-fusion-kvmem.git
+cd ninfer-fusion-kvmem
 ```
 
----
+引擎有两种获取方式：从 [Releases](https://github.com/1314521gjy/ninfer-fusion-kvmem/releases) 下载，或按下方步骤编译当前源码。
 
-## 6. 边界与未验（**不许当已验读**）
+截至 **2026-10-07**，公开 Release [`engine-v0.11.0-kvmem-20261003`](https://github.com/1314521gjy/ninfer-fusion-kvmem/releases/tag/engine-v0.11.0-kvmem-20261003) 提供：
 
-1. **我们只在一张卡上端到端验过**：RTX 4080 SUPER / sm_89 / 32 GB / Windows。其它卡**未验**。
-2. `patches/` 是"38 个改后的完整文件"，**不是逐行 diff**；行级差异请自己用 `git diff --no-index` 生成。
-3. **构建未随仓发布**：不提供 `.exe`/`.dll`，也不承诺在别人的工具链上一定能编过。
-4. `docs/方案/` 里的文档带**本机路径**（`（本机构建根）\...`），是内部视角的原始记录，读时忽略路径即可。
-5. 文档里的"三档"读数对应**我们自己构建的量化制品**（2.125 bpw 三元 / GSQ-RCO IQ3_S / Swift-RCO IQ3_S）；
-   **这些制品与权重都不在本仓**，读数只用于说明引擎行为。
-6. 已知问题与禁忌逐条写在 `docs/05-已知问题与禁忌.md`；**未解决 / 还没修完 / 老包还带着的写在 `docs/06-Bug手册.md`**（含绕法与红线），都不隐藏。
-7. **设备池下限**：已测最小 4,032 token（63 页）；更小**未测**。**低池验收只在 `k8v4` 上做过**，其它 dtype 未做。
-8. **跨页缝截断**（关键串跨两页交界、只搬回一侧）是**已知未修**的固有性质。
-9. **2 分钟以上的冷预填仍可能在连接层被掐**：根因**未定位**，keep-alive/超时是**缓解不是修复**（白皮书 §7.2 / §11）。
+| 文件 | 目标架构 | 对应显卡系列 |
+|---|---|---|
+| `ninfer-serve-86.exe` | `sm_86` | RTX 30 系 |
+| `ninfer-serve-89.exe` | `sm_89` | RTX 40 系 |
+| `ninfer-serve-120a.exe` | `sm_120a` | RTX 50 系 |
+| `SHA256SUMS.txt` | — | 上述引擎的哈希清单 |
 
----
+这些资产**不是完整运行套件**：该 Release 没有附带 DLL 或模型。请按对应构建的依赖准备 CUDA / FFmpeg / libcurl 运行库，将所需 DLL 放在 EXE 同目录；具体依赖与已记录的分发待办见 [NOTICE](NOTICE.md) §6–§7。可用 `Get-FileHash <引擎路径> -Algorithm SHA256` 与下载的清单对照。
 
-## 7. 引用与许可
+**源码与 Release 要分别看**：`main` 上 2026-10-07 的修复与验证记录，不能作为 2026-10-03 引擎资产已包含这些修复的证明。测试时请记录源码提交或 EXE 哈希。
 
-- 引擎基座：**NInfer**（Apache-2.0，基线 `0.11.0-rtx3090`）；本仓的改动声明见 [`NOTICE.md`](NOTICE.md)。
-- KVMem 环的移植来源：**`tancau/ninfer-kvmem-ring`**（Apache-2.0，作者声明，本机逐字核过）。
-- 策略层算法语义参照：**`kvmem-qw3`**（作者 Di Chai，Apache-2.0）—— **本仓含其源码改造版（`src/ops/kvmem/qw3/` 8 件）**，语义沿用其常驻窗口 / 检索预算 / 差量计划
-  （许可原文在源码树内 `src/ops/kvmem/qw3/LICENSE-kvmem-qw3.txt`）。
-- 引擎内第三方库（cpp-httplib / ggml-quants / llama-jinja / nlohmann / spdlog / utf8proc / xgrammar 等）
-  与运行时二进制（CUDA / FFmpeg / libcurl，**不在本仓**）的清单与证据：`NOTICE.md` 与 `docs/09-声明与链接.md`。
-- **模型权重**（Qwen 体系底座与各量化制品）版权归其各自作者与上游，按其各自许可发布；**本仓不包含权重**。
+本仓库与该 Release **均不含模型权重或 `.ninfer` 模型制品**。需要另行准备兼容的 NInfer v3 模型；转换说明见 [源码树的权重转换文档](src-tree/fusion-engine-src/docs/weight-conversion.md)。从仓库根目录先做模型体检：
 
----
-
-## 8. 引用本仓
-
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\自检-模型件.ps1 `
+  -Model D:\ninfer\models\model.ninfer -VramGb 16
 ```
-NInfer · 小显存长上下文（KVMem 环 + host-backed 复用）· 复现白皮书与引擎侧改动, 2026-10-02.
-https://modelscope.cn/models/shensanshu/ninfer-master-shensanshu-kvmem
+
+将路径与 `16` 替换为实际模型和显存容量。体检只读文件，不启动引擎；裸件输出 `MODELCHECK_VERDICT=BARE`、退出码 3，表示可读但没有投机头。损坏或截断的文件应先重新获取。
+
+### 2. 启动一个文本服务
+
+下面是 **sm_89 / RTX 40 系的参数模板**，不是所有显卡的通用配方。将引擎与模型路径替换为本机实际路径；自编译时引擎文件名为 `ninfer-serve.exe`。该示例分配 16 GiB 主机 KV 预算，需另留模型及运行工作区的显存、主机内存。
+
+在 PowerShell 中设置环境变量并启动，变量必须由启动引擎的同一个终端传入：
+
+```powershell
+$engine = 'D:\ninfer\engine\ninfer-serve-89.exe'
+$model = 'D:\ninfer\models\model.ninfer'
+
+$env:NINFER_KV_WINDOW = '16384'
+$env:NINFER_KV_RETRIEVE = '8192'
+$env:NINFER_KV_RING = '1'
+$env:NINFER_HOST_PAGEABLE = '1'
+$env:NINFER_KV_REUSE_HOSTBACKED = '1'
+$env:NINFER_TERNARY_KVMEM_SCORE_QUERY_TAIL = '64'
+
+& $engine $model `
+  --host 127.0.0.1 --port 8091 --model-id ninfer-local `
+  --max-context 262144 --kv-capacity 17920 --kv-dtype k8v4 `
+  --host-kv-mib 16384 --prefill-chunk 1024 `
+  --max-concurrency 1 --max-shared-prefixes 0 `
+  --default-max-tokens 1024 --default-reasoning-effort none
+```
+
+模板不启用投机解码或视觉，以免假定模型含有相应组件。需要投机解码时，以模型体检输出为准：
+
+| 模型组件 | 可用参数 |
+|---|---|
+| 仅 `text` | 不加 `--spec` |
+| 含 `mtp` | `--spec mtp`；MTP-only 件不要加 `--lm-head-draft` |
+| 含 `dflash2` 与对应 proposal head | 按模型配方使用 `--spec dflash2 --draft-tokens 4 --lm-head-draft` |
+
+小卡还需核对权重与工作区占用，不能直接照搬大卡的 dflash2 配方。CUDA Graph 捕获失败时，可尝试 `--no-cuda-graph`，这是已记录的绕道，根因仍未定位。
+
+### 3. 发一条真实请求
+
+在另一个 PowerShell 终端执行：
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:8091/v1/models'
+
+$body = @{
+  model = 'ninfer-local'
+  messages = @(@{ role = 'user'; content = 'What is 17 + 25? Reply with the number only.' })
+  max_tokens = 64
+  stream = $false
+} | ConvertTo-Json -Depth 6
+
+$response = Invoke-RestMethod `
+  -Uri 'http://127.0.0.1:8091/v1/chat/completions' `
+  -Method Post -ContentType 'application/json' -Body $body
+$response.choices[0].message.content
+```
+
+预期答案是 `42`。`/v1/models` 返回 200 只证明模型列表接口可访问；必须检查真实生成请求、答案与进程存活，才能判断服务是否可用。其他 API 与响应字段见 [服务文档](src-tree/fusion-engine-src/docs/serving.md)。
+
+## 怎么确认 KVMem 与复用在工作
+
+短问答成功后，再做长上下文测试；“服务能回答”与“超池检索正确”是两项验收。
+
+1. **核对启动配置**：日志应出现 `engine ready`、实际 `capacity | KV … | pages …` 与 `reuse host-backed: on`。默认启用内容打分时还会出现 `[ring] content scoring ON by default`；检查是否被旧环境变量显式关闭。
+2. **核对检索路径**：超窗题面应能看到 `kvmem_score: SELECT … query_tokens=…`。题面短于窗口时没有 SELECT 属正常情况；单有日志不能证明答案正确。
+3. **核对答案与第二轮**：在长题面的中段放入可验证的内容，提问并追问，检查答案、缓存复用字段和 TTFT。空答案或 `finish_reason=length` 要单独记录，不能直接记作检索漏针。
+4. **做同一二进制上的对照**：按白皮书的固定夹具，将 `QUERY_TAIL` 从 64 改为 256，或关闭检索，验证判据能区分正控与负控。历史掉针比例只适用于相应夹具。
+
+脚本入口见 [verify/README-判据与负控.md](verify/README-判据与负控.md)。包清单脚本需要实际分发包和清单；模型体检、包哈希检查、真实请求、检索质量分别验证不同事项，不能互相替代。
+
+## 从源码编译
+
+优先编译 [当前完整源码树](src-tree/fusion-engine-src/)。`patches/changed-files/` 是早期一批改后的完整文件，**不是全部当前改动或逐行 diff**；不应只覆盖它就声称得到当前 `main`。
+
+Windows 构建需要 NVIDIA 驱动、CUDA Toolkit、MSVC x64 工具链、CMake、Ninja 与 vcpkg。仓内构建指南记录的组合是 **CUDA 13.3 / VS 18 BuildTools**；当前 `CMakeLists.txt` 要求 **CMake ≥ 3.28**，`vcpkg.json` 固定依赖基线。其他工具链的兼容性需自行验证。
+
+在已加载 MSVC x64 环境的 **cmd.exe** 中，将路径替换为实际安装目录，再执行：
+
+```bat
+set "VCPKG_ROOT=D:\vcpkg"
+set "CUDACXX=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe"
+
+cd /d D:\ninfer-fusion-kvmem\src-tree\fusion-engine-src
+cmake -S . -B build-89-clean -G Ninja ^
+  -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_CUDA_ARCHITECTURES=89 ^
+  -DCMAKE_CUDA_COMPILER="%CUDACXX%" ^
+  -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
+  -DVCPKG_TARGET_TRIPLET=x64-windows ^
+  -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=OFF
+
+cmake --build build-89-clean --target ninfer-serve -j 8
+```
+
+产物位于 `build-89-clean\apps\ninfer-serve.exe`。RTX 30 / 50 系分别使用 `86` / `120a`，并各用一个新的构建目录。CMake 还允许 `80`，源码将其标为未实测兼容目标；允许配置不等于已验。
+
+构建注意事项：
+
+- **每个架构使用新的空构建目录**。混用不同时期的对象文件曾导致启动崩溃，见 [0x18c729 根因与修法](根因与修法-0x18c729-20261003.md)。
+- **改头文件后确认相关目标确实重编**。仓内 2026-10-07 记录过增量构建漏掉头文件改动的情况；使用新目录可避免拿旧二进制验新代码。
+- **编译不需要模型**；首次 vcpkg 依赖构建需要网络，CUDA 编译需预留内存。完整环境、驱动要求和 FFMPEG 排错见 [编译指南](编译指南-怎么编.md)。
+
+## 已记录的实测结果
+
+以下是维护者记录的特定机器、模型制品和夹具结果，**不是通用 benchmark 或复现保证**。完整日期、日志名和条件见 [实测回执](实测回执与反馈.md)与 [白皮书](复现白皮书-NInfer-KVMem环-20261002.md) §9。
+
+| 场景 | 已记录读数 | 条件与边界 |
+|---|---|---|
+| 小池多针题面，两轮问答 | 6/6 + 6/6；`TAIL=256` 对照第二轮 2/6 | 2026-10-02；申请 4,000 token 池，按 64 token/页取整为 4,032 token；低池验收用 `k8v4` |
+| 94,698 token 长题 | 3/3 + 3/3 | 显式 `QUERY_TAIL=64` 且确认打分运行的实验臂；另有约 95k 题面零命中反例，仍未定位 |
+| 同会话长前缀复用 | 第二轮 cache 80,075，TTFT 70,829 ms → 126.5 ms | 白皮书 §4 的配置与题面；不代表任意请求都能达到该延迟 |
+| PQ2 + dflash2，draft 12 | 解码 571.9 tok/s | RTX 4080 SUPER 本机记录、计数语料；采用 `req#1 done` 口径，不是一般任务速度 |
+| RTX 5080 社区回执 | 104,991 token 题面中段针命中 | 2026-10-03，设备池为完整 262,144 token；不能当成该卡的小池检索验收 |
+| 256k 非环回归 | 256,944 prompt token；4 路并发两轮通过 | 2026-10-07 源码批，KVMem 关闭；不能作为开环多并发的证据 |
+
+主要本机记录来自 RTX 4080 SUPER / `sm_89`；另有 RTX 5080、3060、5070 Ti 与 5070 Ti Laptop 的社区回执。社区启动成功、单题命中与本机完整验收的范围不同，见 [回执原文](实测回执与反馈.md)。
+
+## 当前边界与排错
+
+[Bug 账本](已知问题-初期版本.md)保留历史状态，并附 **2026-10-07 状态复核与后续更正**。查状态时请读最新复核及对应证据，区分源码已修改、实际构建已验证和旧发布件行为。
+
+| 现象或限制 | 处理与证据入口 |
+|---|---|
+| 开环或内容打分时需要多并发 | 当前实现只支持 `--max-concurrency 1`；源码启动守卫会拒绝不支持的组合（B06） |
+| KVMem 环与 hybrid prefix cache 同开 | 不支持；环需要 Legacy Host KV 层，启动示例不使用 `--use-alt-prefix-caching` |
+| 超池请求崩溃、容量拒绝或重发后不可用 | 保留 `--max-shared-prefixes 0`，客户端 `max_tokens` 不超过设备池 token 数；查看 B01 与对应构建回执，不照抄其他批次的开关 |
+| 服务可访问但长题答错 | 检查检索配置并重跑固定夹具；B07 的约 95k 零命中反例仍未定位 |
+| 关键内容跨页缝，只检索回一侧 | 已记录质量边界，不能据一次通过认定已解决 |
+| 长时间冷预填后连接中断 | 连接层根因未定位；超时 / keep-alive 调整属于缓解 |
+| 小显存卡装不下模型 | 核对权重、投机头、视觉和工作区预算；8 GB 配方仍需真机验证 |
+
+更多症状与绕道见 [排错手册](docs/02-排错手册%20·%20预案与处方.md)、[已知问题与禁忌](docs/05-已知问题与禁忌.md)和 [Bug 手册](docs/06-Bug手册.md)。部分 `docs/` 文档来自特定历史部署包，端口、模型名、容量和本机路径应按对应版本核对。
+
+## 仓库结构与文档
+
+```text
+src-tree/fusion-engine-src/     当前融合引擎源码、内置依赖、测试与上游文档
+patches/                       早期改动快照、说明与逐文件对账清单
+docs/                          部署、调优、排错与原始研究记录
+tools/                         模型容器检查、模型体检、冒烟与校验工具
+verify/                        包校验、运行验证、回归与负控脚本
+NOTICE.md / LICENSE            来源、改动声明与许可
+```
+
+- [复现白皮书](复现白皮书-NInfer-KVMem环-20261002.md)：机制、复现步骤、判据、负控与原始读数。
+- [新增能力与已解决问题](我方-新增能力与已解决问题.md)：存储解耦、host-backed 复用、容量守卫、打分检索、量化内核与交付工具的贡献及上游对账。
+- [部署操作手册](docs/12-给接收方-agent-的操作手册.md)：历史分发包的接入流程；其中的模型、启动器与套件文件不一定随本仓或 Release 提供。
+- [文档索引](docs/README.md)、[补丁说明](patches/README-改动说明.md)、[验证脚本索引](verify/README-判据与负控.md)：按任务继续阅读。
+
+`NOTICE.md` 记录的 **2026-10-03** 基线对账为：2,327 件相同、92 件修改、44 件新增、0 件缺失。这是有日期的历史快照；当前差异应以源码、提交和对账脚本重新核对。
+
+## 反馈问题
+
+请在 [Issues](https://github.com/1314521gjy/ninfer-fusion-kvmem/issues) 提供可复现信息：
+
+- 源码提交或 Release 标签、引擎 SHA256；GPU / 显存 / 驱动 / Windows 版本。
+- 模型来源、文件哈希、模型体检输出；完整启动参数与相关 `NINFER_*` 环境变量。
+- 启动日志、请求参数、响应码、`finish_reason`、实际答案与预期答案。
+- 长上下文问题补充 token 数、设备池 / 主机预算、是否第二轮、是否能用短题或负控区分。
+
+请先去除日志中的密钥、私人提示内容与本机敏感路径。仅报告“端口在监听”或“模型列表返回 200”不足以复现生成失败。
+
+## 来源、许可与引用
+
+本仓内容按 [Apache License 2.0](LICENSE) 发布。各第三方目录保留自身许可证；模型权重按各自来源许可处理，本仓不分发权重。
+
+- **引擎基座**：[Neroued/ninfer](https://github.com/Neroued/ninfer)、[ashalliants/ninfer-3090](https://github.com/ashalliants/ninfer-3090)与 [iamwavecut/ninfer-3090](https://github.com/iamwavecut/ninfer-3090)；本仓基线版本为 `0.11.0-rtx3090`。
+- **KVMem 环来源**：[tancau/ninfer-kvmem-ring](https://github.com/tancau/ninfer-kvmem-ring)，含移植与共用改动面。
+- **策略层来源**：[kvmem/kvmem-qw3](https://github.com/kvmem/kvmem-qw3)，作者 Di Chai；源码树包含其改造版及许可、notices。
+- 逐文件来源、项目改动、CraneBW / laamaafung 的语义参照、第三方库与运行库分发待办，以 [NOTICE.md](NOTICE.md) 为准。
+
+引用本项目时，请附使用的提交或 Release 标签，便于区分实验与构建版本：
+
+```text
+NInfer Fusion KVMem — KVMem 环、host-backed 复用与长上下文推理复现记录.
+https://github.com/1314521gjy/ninfer-fusion-kvmem
+Version: <commit SHA or release tag>; accessed: <YYYY-MM-DD>.
 ```
