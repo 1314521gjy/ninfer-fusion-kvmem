@@ -14,6 +14,7 @@
 // LOCAL (2026-10-02, defect D-1): the startup warning below names the content-scorer switch state, so
 // this file needs the switch's own predicate (host-safe header: no CUDA kernel is pulled in).
 #include "ops/kvmem/kvmem_score.h"
+#include "ops/kvmem/kvmem_shadow.h"   // B06: the mean-K index / raw-K harvest switch (kvmem_shadow_enabled)
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/candidate_selector.h"
 #include "ninfer/ops/context_kv_materialize.h"
@@ -96,6 +97,20 @@ std::int32_t checked_i32(std::uint64_t value, const char* label) {
 std::uint32_t page_count(std::uint32_t capacity) {
     if (capacity == 0) { throw std::invalid_argument("Paged KV capacity must be positive"); }
     return 1U + (capacity - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+}
+
+// 2026-10-05 (P1-a startup guard): how many leading pages the attention-sink pin takes.
+// MIRRORS storage/context.cpp's proto_kv_sink_pages() exactly -- same env var, same default (4 pages
+// = 256 tokens, StreamingLLM-style), same integer division by the page size. It is re-derived here
+// rather than called because that helper has INTERNAL linkage in context.cpp (no header declares it),
+// so the planner cannot reach it. If either copy changes, change BOTH -- and the guard's whole point
+// is that the two must agree about what the sink will reserve at run time.
+std::uint32_t sink_pages_for_guard() {
+    const char* text = std::getenv("NINFER_KV_SINK");
+    if (text == nullptr) { return 4U; }
+    const long tokens = std::strtol(text, nullptr, 10);
+    if (tokens <= 0) { return 0U; }
+    return static_cast<std::uint32_t>(tokens / static_cast<long>(kPagedKVPageSize));
 }
 
 // The Main KV pages a plan may hold. The Legacy cache retains context in continuations whose pages
@@ -1048,6 +1063,67 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
             throw std::invalid_argument(
                 "kv_capacity is outside the usable range for max_context and max_concurrency");
         }
+        // ---- P1-a STARTUP GUARD (2026-10-05): the sink pin must fit the pool. ------------------
+        // WHY THIS EXISTS: without it, NINFER_KV_SINK larger than the pool does NOT fail at startup.
+        // It fails on EVERY request instead, and the failure is not a capacity error the client can
+        // read: demote_kv_pages_to_host starts its scan AT sink_pages, so when sink_pages >= mapped
+        // the scan breaks immediately, freed stays 0, and the answer is cut off at the lease.
+        // Measured 2026-10-05 on the 8 GB tier's real pool (--kv-capacity 2176 = 34 pages) with the
+        // MEASURED skeleton size (2,808 tokens = 44 pages): sink 44 > pool 34 => every request dies,
+        // and the output was truncated to 2 tokens before the client could see why.
+        // The guard turns that into one readable refusal at startup, naming the gap and three ways out.
+        // The "+ 1" is deliberate: a pool that exactly equals the sink leaves no room for the request
+        // being served, and the measured failure mode of that case was "needs 16 free, 15 available"
+        // -- i.e. short by exactly one page.
+        const std::uint32_t sink_pages = sink_pages_for_guard();
+        // ---- SECOND GATE (2026-10-05, added after measurement): a pin that fills the pool is as
+        // unservable as a pin that does not fit. The "+ 1" gate alone ACCEPTED pool 45 + sink 44 and
+        // then every request failed. The threshold is measured, not guessed: sweeping the pool with
+        // the pin fixed at 44 pages (probe-kmin-sweep.ps1, one request each) gave
+        //     pool 45..52  (free 0)                    -> HTTP 429
+        //     pool 55..59  (free 0..3)                 -> HTTP 200 but the WRONG tool was named
+        //     pool 60..64  (free 4..8)                 -> HTTP 200 and the tool named correctly
+        // i.e. correctness needs at least kMinWorkingPages of pool beyond the pin. 4 pages = 256
+        // tokens of working room; below that the ring has no room to restore what it dropped.
+        constexpr std::uint32_t kMinWorkingPages = 4U;
+        if (sink_pages != 0) {
+            const std::uint32_t needed_total = sink_pages + kMinWorkingPages;
+            if (needed_total > requested_pages) {
+                const std::uint32_t shortfall = needed_total - requested_pages;
+                throw std::invalid_argument(
+                    std::string("NINFER_KV_SINK pin leaves no working room in the KV pool: the pin "
+                                "needs ") + std::to_string(sink_pages) +
+                    " page(s) and the ring needs at least " + std::to_string(kMinWorkingPages) +
+                    " page(s) beyond it (measured: below that the tool block is dropped and answers "
+                    "name a tool that does not exist), so the pool must hold at least " +
+                    std::to_string(needed_total) + " page(s); it holds " +
+                    std::to_string(requested_pages) + " -- short by " +
+                    std::to_string(shortfall) + " page(s).\n"
+                    "       Sizing: NINFER_KV_SINK is measured in TOKENS and is divided by the page "
+                    "size (" + std::to_string(static_cast<unsigned>(kPagedKVPageSize)) +
+                    "), so it rounds DOWN; set a multiple of that.\n"
+                    "       Ways out (pick one):\n"
+                    "         1) raise --kv-capacity to at least " + std::to_string(needed_total) +
+                    " page(s) (= " +
+                    std::to_string(static_cast<std::uint64_t>(needed_total) *
+                                   static_cast<std::uint64_t>(kPagedKVPageSize)) +
+                    " tokens), remembering to raise --max-context with it;\n"
+                    "         2) lower NINFER_KV_SINK so that it leaves " +
+                    std::to_string(kMinWorkingPages) + " page(s) of room;\n"
+                    "         3) unset NINFER_KV_SINK (or set it to 0) to drop the pin and accept "
+                    "that the prefix/tool block may be demoted.\n"
+                    "       Current configuration: pool " + std::to_string(requested_pages) +
+                    " page(s) (--kv-capacity " + std::to_string(options.kv_capacity.explicit_tokens) +
+                    " tokens), logical " + std::to_string(logical_pages) + " page(s) (--max-context " +
+                    std::to_string(options.max_context) + " tokens), max_concurrency " +
+                    std::to_string(options.max_concurrency) + ", NINFER_KV_SINK " +
+                    std::to_string(sink_pages) + " page(s).");
+            }
+        }
+        // NOTE (2026-10-05): an earlier, weaker gate here was `sink_pages + 1 > requested_pages`.
+        // It is deliberately GONE because the kMinWorkingPages gate above is strictly stronger
+        // (sink + 4 > sink + 1 for every sink), so keeping it would only be dead code that
+        // suggests a weaker contract than the one actually enforced.
         break;
     }
     case KvCapacityMode::Automatic:
@@ -1197,6 +1273,28 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                      "       Run with --max-concurrency 1, or unset NINFER_KV_WINDOW.\n");
         throw std::invalid_argument(
             "NINFER_KV_WINDOW (KVMem ring) requires --max-concurrency 1");
+    }
+    // B06 (2026-10-04): the mean-K index is ONE process-wide slot, registered as a known limitation by
+    // the component itself (mean_k_index.h:248-251): "one index for the whole process means two
+    // concurrent sequences share it. V1 drives a single sequence... before --max-concurrency > 1 is used
+    // with KVMem on, this must become one index per lane and the arena account must grow by
+    // N x mean_k_index_bytes(layers, blocks, kv_heads, head_dim)".
+    // The guard above only covers the RING configuration. The scorer can also be switched on with the
+    // ring OFF (an explicit NINFER_TERNARY_KVMEM=1 and no NINFER_KV_WINDOW), and that configuration was
+    // reachable with --max-concurrency > 1: two lanes then share the index -- and the raw-K harvest,
+    // which is gated by the same switch -- so one sequence's KEPT set can be another sequence's blocks.
+    // A silent wrong retrieval is the one class of defect this project refuses to ship, so refuse the
+    // combination loudly and name both ways out. Making the index per-lane is a component change (one
+    // index per lane + the arena account xN), not a flag; until that exists, this combination is the
+    // boundary, not a tuning knob.
+    if (inputs.max_concurrency > 1 && ops::detail::kvmem_shadow_enabled()) {
+        std::fprintf(stderr,
+                     "[kvmem] the KVMem content scorer keeps ONE mean-K index (and one raw-K harvest) for "
+                     "the whole process, so two active sequences would rank each other's blocks "
+                     "(mean_k_index.h:248-251).\n"
+                     "       Run with --max-concurrency 1, or switch the scorer off "
+                     "(NINFER_TERNARY_KVMEM=0).\n");
+        throw std::invalid_argument("KVMem content scoring requires --max-concurrency 1");
     }
     if (impl->context_cache.enabled && impl->context_cache.mode == ContextCacheMode::Hybrid) {
         if (ring_requested()) {
