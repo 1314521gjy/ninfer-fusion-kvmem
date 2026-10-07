@@ -1,0 +1,6 @@
+﻿"arm"	"env"	"cli_gate"	"engine_gate"	"http"	"outcome"	"evidence"
+"hand: only NINFER_KV_RING=1"	"NINFER_KV_RING=1"	"pass"	"FAIL"	"-1"	"FATAL kv_capacity must be at least max_context (进程退出，从未服务)"	"b20-ring-probe\hand\err.log"
+"hand: only NINFER_KV_WINDOW=1536"	"NINFER_KV_WINDOW=1536"	"FAIL"	"-"	"-1"	"CLI 拒绝：--kv-capacity must be at least --max-context (set NINFER_KV_RING=1 ...)"	"b20-ring-probe\hand\window-only.err.log"
+"wheel: bare-ring"	"NINFER_KV_RING=1"	"pass"	"FAIL"	"-1"	"同上 FATAL（与 hand 臂一致）"	"b20-ring-probe\bare-ring\p63\err.log"
+"wheel: bare-noring"	"(none)"	"FAIL"	"-"	"-1"	"CLI 拒绝"	"b20-ring-probe\bare-noring\p63\err.log"
+"wheel: full-env (RING+WINDOW+5)"	"NINFER_KV_RING=1;NINFER_KV_WINDOW=1536;+5"	"pass"	"pass"	"200"	"[ring] budgets: skeleton=44 evidence=12 recent=0 free=7 (pool 63); tool=yes"	"b20-ring-probe\full-env-ring\p63\err.log"

@@ -106,4 +106,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
   ⚠️ **每调用一次会整表重写自己的 `b-tier.tsv`** ⇒ 不同臂请给**不同 `-OutRoot`**，否则先跑的行会被后跑的清掉（本条踩过）。
 - **`读数-20261007/`** —— 上面脚本当天的**原始读数表**（TSV），文件名对应回执节次：`A档-a-tier.tsv` → §8.1–8.6 · `B档-b1-b2.tsv` → §8.8 · `B档-b2-4lanes.tsv` → §8.9 · `B3-*.tsv` → §8.3 的 kMin 判据 · `T1-full-258.tsv` + `T1-隔离-*.tsv` → §8.7。
   **2026-10-07 19:0x 补入（L0 批）**：`L0-驱动读数.tsv`（B27 起图失败率 10 次启动 + #17/#15 汇总）· `L0-17-假绿-*.tsv`（**假绿那一版**：池 280/sink 265，三格全 yes —— 保留它是为了记住"题面装进 skeleton 时该格不是判别格"）· `L0-17b-{A对照,B判别,C,D}.tsv`（**证伪 `pool − sink ≥ 16` 页的那四点**：题面 7,563 token 时 slack 16/18 都答错、slack 76 答对）· `L0-15-ring-{on,off}-*.tsv`（`max-context == 池` ⇒ 环被关）。
+  **2026-10-07 深夜补入**：`B29-15臂-复跑.tsv`（B29 修复后那一族 15 条臂 **15/15 PASS**）· `四项验收闸门-B29后.tsv`（**4/4 PASS**）· `S2-配对重复-每臂3次.tsv` + `S2-判据结论.tsv`（S2 运行时统计与 C8–C11）· `B30-环两门矩阵.tsv`（**只设 `NINFER_KV_RING` ⇒ CLI 放行 + 引擎 FATAL；只设 `NINFER_KV_WINDOW` ⇒ CLI 拒；两个都设 ⇒ 200**）· `B24-空响应三臂.tsv`（不带预算 ⇒ `content` 空；带 `thinking_budget:1024` ⇒ 非空）。
   原始**大**日志（JUnit XML、ctest 控制台全文、引擎 `err.log`、E2/E5 harness 臂日志）留在本机未随仓发布；需要时按 §8.7 的**复现仪**与本节第 7 条重跑。
+
+## 6. 2026-10-07 深夜补记（跑测试的两条操作事实 + 判据指针）
+
+- **测试是一个多程序 bundle：`build-ninja\tests\ninfer_tests.exe`**（文件名带 `n`）。直接跑它时用法是
+  `ninfer_tests.exe <程序名>`，`ninfer_tests.exe --list` 会列出全部程序名（程序名 = ctest 用例名）。
+  ⚠️ 用 `infer_tests.exe`（少一个 `n`）去 `Test-Path` 会得到假阴性 —— 本机实测过，并因此误判"二进制不存在"。
+- **三条 `*_routes_*` 注册跑的是同一条命令**：`ninfer_gdn_input_proj_conv_record_test`、
+  `…_conv_record_legacy_routes_test`、`…_conv_record_unified_routes_test` 的 `add_test` 命令行**完全相同**
+  （都是 `ninfer_tests.exe ninfer_gdn_input_proj_conv_record_test`），差别只在 ctest 的 **`ENVIRONMENT` 属性**。
+  ⇒ 想跑"legacy / unified 路线"的臂，**只能走 ctest**（本目录的 `verify-tests-ctest-negcontrol.ps1` / 内部 `run-tests.ps1` 都行），
+  直接调 exe **只能得到默认路线**（`ctest -N -V -R conv_record` 可以把三行命令原样打出来核对）。
+- **一条时序参考**：`…_conv_record_*` 这一族 15 条臂合计 ≈ **788 s**，其中 `ninfer_gdn_replay_fold_wide_test`
+  单项 **415 s** ⇒ 用 ctest 跑这一族要**后台跑**（内联 10 分钟必超时；本机踩过）。
+- **判据与逐格读数（含"怎么变红"）的唯一归属处是 `实测回执与反馈.md`**：S3 请求级思考预算 + S2 分通道 presence penalty
+  在 **§9**（S2 的口径 = 同题面 × 每臂 3 次 × 同一引擎实例，统计量 = 思考文本 8-gram 复读率 `dup8`，**跨臂比较必须等长前缀**）；
+  B24「轮级空响应」的复现与缓解在 **§10**（判据看 `content` 是否为空，**不能只看 `finish_reason`**）。
+  本节只记"怎么跑"，不复制那里的数字。

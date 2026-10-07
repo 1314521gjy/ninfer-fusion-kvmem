@@ -1,0 +1,5 @@
+﻿"id"	"claim"	"verdict"	"detail"
+"C8"	"noise floor measured: >= 3 usable reps in every thinking arm"	"PASS"	"n_off=3 n_hi=3 n_lo=3"
+"C9"	"thinking channel: |effect| beyond own-arm noise (flag is live)"	"PASS"	"mean_off=0.2385 mean_hi=0.1922 noise=0"
+"C10"	"direction: repetition falls as penalty rises (hi < off < lo)"	"FAIL"	"hi=0.1922 off=0.2385 lo=0.2099"
+"C11"	"non-thinking channel: shift inside its own noise (or one-gram granularity)"	"PASS"	"mean_off=0 mean_hi=0 noise=0 gran=0.0072"

@@ -1,0 +1,4 @@
+﻿"arm"	"http"	"finish_reason"	"completion_tokens"	"reasoning_tokens"	"content_len"	"reasoning_chars"
+"mt2048-nobudget"	"200"	"length"	"2048"	"2048"	"0"	"4631"
+"mt2048-budget1024"	"200"	"length"	"2048"	"1049"	"1597"	"3017"
+"mt2048-nothink"	"200"	"stop"	"1941"	"0"	"4552"	"0"
