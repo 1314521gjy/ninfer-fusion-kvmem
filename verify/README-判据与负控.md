@@ -105,4 +105,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
   两条纪律已内建：① B2 臂跑完**再发一条完成**证明引擎还活着（`/v1/models` 假健康，见 §2 第 1 条）；② 引擎起不来时**打印日志路径 + 尾部 ERROR 行**（否则现场只剩一句"没起来"）。
   ⚠️ **每调用一次会整表重写自己的 `b-tier.tsv`** ⇒ 不同臂请给**不同 `-OutRoot`**，否则先跑的行会被后跑的清掉（本条踩过）。
 - **`读数-20261007/`** —— 上面脚本当天的**原始读数表**（TSV），文件名对应回执节次：`A档-a-tier.tsv` → §8.1–8.6 · `B档-b1-b2.tsv` → §8.8 · `B档-b2-4lanes.tsv` → §8.9 · `B3-*.tsv` → §8.3 的 kMin 判据 · `T1-full-258.tsv` + `T1-隔离-*.tsv` → §8.7。
-  原始**大**日志（JUnit XML、ctest 控制台全文、引擎 `err.log`）留在本机未随仓发布；需要时按 §8.7 的**复现仪**重跑。
+  **2026-10-07 19:0x 补入（L0 批）**：`L0-驱动读数.tsv`（B27 起图失败率 10 次启动 + #17/#15 汇总）· `L0-17-假绿-*.tsv`（**假绿那一版**：池 280/sink 265，三格全 yes —— 保留它是为了记住"题面装进 skeleton 时该格不是判别格"）· `L0-17b-{A对照,B判别,C,D}.tsv`（**证伪 `pool − sink ≥ 16` 页的那四点**：题面 7,563 token 时 slack 16/18 都答错、slack 76 答对）· `L0-15-ring-{on,off}-*.tsv`（`max-context == 池` ⇒ 环被关）。
+  原始**大**日志（JUnit XML、ctest 控制台全文、引擎 `err.log`、E2/E5 harness 臂日志）留在本机未随仓发布；需要时按 §8.7 的**复现仪**与本节第 7 条重跑。
