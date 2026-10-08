@@ -14,7 +14,11 @@ function(ninfer_cuda_archive target)
   if(WIN32)
     set_target_properties(${target} PROPERTIES CUDA_RUNTIME_LIBRARY Static)
   endif()
-  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  # Gated by NINFER_LINE_INFO (root CMakeLists, default OFF): -lineinfo is pure metadata but it
+  # inflates these archives and slows every CUDA compile.
+  if(NINFER_LINE_INFO)
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  endif()
 endfunction()
 
 function(ninfer_cuda_non_rdc_archive target)
@@ -24,7 +28,11 @@ function(ninfer_cuda_non_rdc_archive target)
   if(WIN32)
     set_target_properties(${target} PROPERTIES CUDA_RUNTIME_LIBRARY Static)
   endif()
-  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  # Gated by NINFER_LINE_INFO (root CMakeLists, default OFF): -lineinfo is pure metadata but it
+  # inflates these archives and slows every CUDA compile.
+  if(NINFER_LINE_INFO)
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  endif()
 endfunction()
 
 # Runtime DLL staging for the apps and tests.

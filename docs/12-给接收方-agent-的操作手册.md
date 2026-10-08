@@ -230,9 +230,9 @@ INFO  req#N done | openai-chat | … | prompt <大数> | … | cache <大数> (�
 ### 5.1 五个环境变量，缺一不可
 
 ```
-NINFER_KV_WINDOW=16384          # 常驻窗口（设备上真的留多少 token）
+NINFER_KV_WINDOW=16384          # 常驻窗口（设备上真的留多少 token）—— 也是"环是否启用"的门（B30 起）
 NINFER_KV_RETRIEVE=8192         # 检索预算 —— 缺它 = 静默答错（见下）
-NINFER_KV_RING=1                # 开 ring
+NINFER_KV_RING=1                # 历史开关：新件里已不再被读取（环的门看上面那行）
 NINFER_HOST_PAGEABLE=1          # 宿主页可换入
 NINFER_KV_REUSE_HOSTBACKED=1    # 允许复用宿主驻留页
 ```

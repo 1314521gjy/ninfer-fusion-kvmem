@@ -132,9 +132,9 @@
 
 | 变量 | 作用 |
 |---|---|
-| `NINFER_KV_WINDOW` | 常驻窗口（也是"环是否启用"的判据） |
+| `NINFER_KV_WINDOW` | 常驻窗口 —— **也正是"环是否启用"的那道门**（B30，2026-10-07 起） |
 | `NINFER_KV_RETRIEVE` | 每轮检索/搬回预算 |
-| `NINFER_KV_RING=1` | 启用环 |
+| `NINFER_KV_RING=1` | 历史开关。**B30 之后新件里已不再读取它**（设了无害、不会开环）；环的门看 `NINFER_KV_WINDOW` |
 | `NINFER_HOST_PAGEABLE=1` | 宿主层用可换页内存 |
 | `NINFER_KV_REUSE_HOSTBACKED=1` | 允许复用宿主层支撑的前缀 |
 

@@ -67,6 +67,14 @@ endif()
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+# -lineinfo is metadata only (it changes no instruction), but it inflates every CUDA object -- the ops
+# library alone reaches 2.89 GB with it on, which is also what pushes the link into MSVC's LNK1248
+# image-size limit -- and it makes each nvcc/ptxas step substantially slower. Default OFF: the engine
+# reports failures with named messages of its own (failure_class), so source lines are a debugging
+# convenience, not a runtime need. Configure with -DNINFER_LINE_INFO=ON when a crash trace or a
+# profiler really needs the line table.
+option(NINFER_LINE_INFO
+       "Embed CUDA line information (-lineinfo): larger objects, slower CUDA compiles, line numbers in traces" OFF)
 option(NINFER_SFU_SIGMOID_SILU
        "Evaluate sigmoid and SiLU on the SFU instead of with expf and a divide" OFF)
 if(NINFER_SFU_SIGMOID_SILU)
