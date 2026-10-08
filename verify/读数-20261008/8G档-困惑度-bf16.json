@@ -1,0 +1,272 @@
+{
+  "artifact": {
+    "architecture": "Qwen3_5ForCausalLM",
+    "formats": [
+      "bf16",
+      "fp32",
+      "ptq1_g128_fp16"
+    ],
+    "name": "bonsai2-27b",
+    "path": "E:\\ship-next\\modelpack-ptq1-20261002\\bonsai2_27b_ternary_ptq1_native_mtp.ninfer",
+    "prefill_signature": "97ad7762bf1cdc0c9e4b00397a0949ccb69f040ced015424d53ae88730b16f18"
+  },
+  "corpus": {
+    "id": "custom-00.txt",
+    "mode": "custom",
+    "source": "E:\\infer-build\\publish-20261006\\fusion-engine-src\\eval\\corpora\\perplexity-1m\\data\\pg19\\00.txt",
+    "stream_count": 1
+  },
+  "domains": [
+    {
+      "domain": "custom",
+      "mean_nll": 2.2022935476232406,
+      "perplexity": 9.045736553266666,
+      "scored_tokens": 61425,
+      "total_nll": 135275.88116275755
+    }
+  ],
+  "execution": {
+    "context_tokens": 4096,
+    "device": 0,
+    "fast_prefill_kernel": false,
+    "kv_dtype": "bf16",
+    "prefill_chunk_tokens": 1024,
+    "purpose": "causal_scoring",
+    "rope_scaling_factor": 1.0,
+    "rope_scaling_original_context": 0,
+    "rope_yarn": false,
+    "rope_yarn_factor": 1.0,
+    "score_tile_tokens": 1024,
+    "stride_tokens": 4096,
+    "windows": "disjoint"
+  },
+  "metric": {
+    "log_base": "natural",
+    "name": "fixed-window truncated-context causal perplexity"
+  },
+  "overall": {
+    "mean_nll": 2.2022935476232406,
+    "perplexity": 9.045736553266666,
+    "scored_tokens": 61425,
+    "total_nll": 135275.88116275755
+  },
+  "schema_version": 4,
+  "streams": [
+    {
+      "domain": "custom",
+      "id": "00.txt",
+      "input_tokens": 65456,
+      "mean_nll": 2.2022935476232406,
+      "path": "E:\\infer-build\\publish-20261006\\fusion-engine-src\\eval\\corpora\\perplexity-1m\\data\\pg19\\00.txt",
+      "perplexity": 9.045736553266666,
+      "scored_tokens": 61425,
+      "seconds": 28.2086581,
+      "total_nll": 135275.88116275755,
+      "unscored_tokens": 1,
+      "windows": [
+        {
+          "first_target": 1,
+          "index": 0,
+          "input_begin": 0,
+          "input_end": 4096,
+          "mean_nll": 2.1400796337922885,
+          "perplexity": 8.500114498287312,
+          "scored_tokens": 4095,
+          "seconds": 1.9942133,
+          "target_begin": 1,
+          "target_end": 4096,
+          "total_nll": 8763.62610037942
+        },
+        {
+          "first_target": 1,
+          "index": 1,
+          "input_begin": 4096,
+          "input_end": 8192,
+          "mean_nll": 2.0810049411578,
+          "perplexity": 8.012516977792469,
+          "scored_tokens": 4095,
+          "seconds": 1.8547574,
+          "target_begin": 4097,
+          "target_end": 8192,
+          "total_nll": 8521.715234041192
+        },
+        {
+          "first_target": 1,
+          "index": 2,
+          "input_begin": 8192,
+          "input_end": 12288,
+          "mean_nll": 2.0466671089124544,
+          "perplexity": 7.742054633605447,
+          "scored_tokens": 4095,
+          "seconds": 1.8556637,
+          "target_begin": 8193,
+          "target_end": 12288,
+          "total_nll": 8381.1018109965
+        },
+        {
+          "first_target": 1,
+          "index": 3,
+          "input_begin": 12288,
+          "input_end": 16384,
+          "mean_nll": 2.127128288094676,
+          "perplexity": 8.390736402610237,
+          "scored_tokens": 4095,
+          "seconds": 1.8921245,
+          "target_begin": 12289,
+          "target_end": 16384,
+          "total_nll": 8710.590339747698
+        },
+        {
+          "first_target": 1,
+          "index": 4,
+          "input_begin": 16384,
+          "input_end": 20480,
+          "mean_nll": 2.183909730316131,
+          "perplexity": 8.880960630967405,
+          "scored_tokens": 4095,
+          "seconds": 1.895327,
+          "target_begin": 16385,
+          "target_end": 20480,
+          "total_nll": 8943.110345644556
+        },
+        {
+          "first_target": 1,
+          "index": 5,
+          "input_begin": 20480,
+          "input_end": 24576,
+          "mean_nll": 2.1173854594480503,
+          "perplexity": 8.309383841169755,
+          "scored_tokens": 4095,
+          "seconds": 1.8918138,
+          "target_begin": 20481,
+          "target_end": 24576,
+          "total_nll": 8670.693456439767
+        },
+        {
+          "first_target": 1,
+          "index": 6,
+          "input_begin": 24576,
+          "input_end": 28672,
+          "mean_nll": 2.1298059662294904,
+          "perplexity": 8.413234201500222,
+          "scored_tokens": 4095,
+          "seconds": 1.8928545,
+          "target_begin": 24577,
+          "target_end": 28672,
+          "total_nll": 8721.555431709763
+        },
+        {
+          "first_target": 1,
+          "index": 7,
+          "input_begin": 28672,
+          "input_end": 32768,
+          "mean_nll": 2.199709846680428,
+          "perplexity": 9.022395241674536,
+          "scored_tokens": 4095,
+          "seconds": 1.8962194,
+          "target_begin": 28673,
+          "target_end": 32768,
+          "total_nll": 9007.811822156353
+        },
+        {
+          "first_target": 1,
+          "index": 8,
+          "input_begin": 32768,
+          "input_end": 36864,
+          "mean_nll": 2.2921525876926063,
+          "perplexity": 9.896217245338086,
+          "scored_tokens": 4095,
+          "seconds": 1.8758569,
+          "target_begin": 32769,
+          "target_end": 36864,
+          "total_nll": 9386.364846601224
+        },
+        {
+          "first_target": 1,
+          "index": 9,
+          "input_begin": 36864,
+          "input_end": 40960,
+          "mean_nll": 2.2686452011744467,
+          "perplexity": 9.666296052380211,
+          "scored_tokens": 4095,
+          "seconds": 1.8563899,
+          "target_begin": 36865,
+          "target_end": 40960,
+          "total_nll": 9290.102098809359
+        },
+        {
+          "first_target": 1,
+          "index": 10,
+          "input_begin": 40960,
+          "input_end": 45056,
+          "mean_nll": 2.225367200692953,
+          "perplexity": 9.256881313133999,
+          "scored_tokens": 4095,
+          "seconds": 1.8608706,
+          "target_begin": 40961,
+          "target_end": 45056,
+          "total_nll": 9112.878686837641
+        },
+        {
+          "first_target": 1,
+          "index": 11,
+          "input_begin": 45056,
+          "input_end": 49152,
+          "mean_nll": 2.088172497260694,
+          "perplexity": 8.070153452338154,
+          "scored_tokens": 4095,
+          "seconds": 1.8620833,
+          "target_begin": 45057,
+          "target_end": 49152,
+          "total_nll": 8551.066376282542
+        },
+        {
+          "first_target": 1,
+          "index": 12,
+          "input_begin": 49152,
+          "input_end": 53248,
+          "mean_nll": 2.3237930079356404,
+          "perplexity": 10.214344010352914,
+          "scored_tokens": 4095,
+          "seconds": 1.8598973,
+          "target_begin": 49153,
+          "target_end": 53248,
+          "total_nll": 9515.932367496447
+        },
+        {
+          "first_target": 1,
+          "index": 13,
+          "input_begin": 53248,
+          "input_end": 57344,
+          "mean_nll": 2.3679675935651248,
+          "perplexity": 10.675672913966569,
+          "scored_tokens": 4095,
+          "seconds": 1.8596638,
+          "target_begin": 53249,
+          "target_end": 57344,
+          "total_nll": 9696.827295649186
+        },
+        {
+          "first_target": 1,
+          "index": 14,
+          "input_begin": 57344,
+          "input_end": 61440,
+          "mean_nll": 2.4426141513958206,
+          "perplexity": 11.503072244610706,
+          "scored_tokens": 4095,
+          "seconds": 1.8606957,
+          "target_begin": 57345,
+          "target_end": 61440,
+          "total_nll": 10002.504949965885
+        }
+      ]
+    }
+  ],
+  "timing": {
+    "load_seconds": 2.5254991,
+    "read_and_tokenize_seconds": 0.0218814,
+    "score_seconds": 28.2088891,
+    "scored_tokens_per_second": 2177.505104233261,
+    "total_seconds": 30.8341594
+  }
+}

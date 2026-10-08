@@ -1,0 +1,42 @@
+[start-8g] model = E:\ship-next\modelpack-ptq1-20261002\bonsai2_27b_ternary_ptq1_native_mtp.ninfer
+[start-8g] window = 65536 tokens, kv-dtype = rk4v4-e8, pool = auto
+[start-8g] remaining args are passed through: "E:\ship-next\modelpack-ptq1-20261002\bonsai2_27b_ternary_ptq1_native_mtp.ninfer"
+2026-10-08 00:18:48.775  INFO  build unknown
+2026-10-08 00:18:48.775  INFO  engine init | constructing service
+2026-10-08 00:18:48.795  INFO  starting engine
+2026-10-08 00:18:48.852  INFO  engine | engine init | device ready, constructing model instance
+2026-10-08 00:18:48.852  INFO  engine | device profile nvidia-geforce-rtx-4080-super-sm89: 51 routed keys (calibration)
+2026-10-08 00:18:49.370  INFO  loading weights | 5.52 GiB
+2026-10-08 00:18:51.997  INFO  weights ready | 5.52 GiB | 2.6s | 2.10 GiB/s
+[ninfer] reuse host-backed: on
+[ring] content scoring ON by default (the ring is configured): retrieval ranks pages by the query-conditioned content score. Set NINFER_TERNARY_KVMEM_SCORE=0 (or the master switch NINFER_TERNARY_KVMEM=0) to fall back to the lexical ranking (that is the negative control, not a tuning knob).
+[ninfer] reuse host-backed: on
+[ring] content scoring ON by default (the ring is configured): retrieval ranks pages by the query-conditioned content score. Set NINFER_TERNARY_KVMEM_SCORE=0 (or the master switch NINFER_TERNARY_KVMEM=0) to fall back to the lexical ranking (that is the negative control, not a tuning knob).
+[ninfer] reuse host-backed: on
+[ring] content scoring ON by default (the ring is configured): retrieval ranks pages by the query-conditioned content score. Set NINFER_TERNARY_KVMEM_SCORE=0 (or the master switch NINFER_TERNARY_KVMEM=0) to fall back to the lexical ranking (that is the negative control, not a tuning knob).
+2026-10-08 00:18:52.037  INFO  pinning host state | 598.6 MiB
+2026-10-08 00:18:52.037  INFO  host state pinned | 598.6 MiB | 45 us
+2026-10-08 00:18:52.037  INFO  pinning host KV | 16.0 GiB
+2026-10-08 00:18:52.037  INFO  host KV pinned | 16.0 GiB | 154 us
+2026-10-08 00:18:52.064  INFO  engine | engine init | model instance ready
+2026-10-08 00:18:52.064  INFO  engine | engine init | constructing core (generation)
+2026-10-08 00:18:52.065  INFO  engine | engine init | core ready (generation)
+2026-10-08 00:18:52.065  INFO  engine finalized | 329 us
+2026-10-08 00:18:52.065  INFO  engine ready | bonsai2-27b | total 3.3s | weights 5.52 GiB | CUDA sync auto
+2026-10-08 00:18:52.065  INFO  capacity | KV 66,432 tokens, rk4v4-e8, auto | pages 1,038/1,038 | runtime 1.32 GiB | free 23.8 GiB
+2026-10-08 00:18:52.065  INFO  context cache | 1 active + 1 cached device states | host 8 states, 16.0 GiB KV | private 2 | shared 7 | anchors 2
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+raw_k_shadow: harvest installed layers=16 kv_size=1024 tokens=384 (12.0 MiB device, same pinned)
+kvmem_index: installed layers=16 heads=4 head_dim=256 blocks=2048 bytes=128.1 MiB zero=cudaSuccess
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+kvmem_score: ARMED capacity_blocks=2048 layers_total=16 heads=24 kv_heads=4 head_dim=256
+kvmem_score: query span [3,48) not usable for chunk [51,53) (empty overlap or longer than MAXQ=256) -- falling back to the tail rule (QUERY_TAIL)
+kvmem_score: KEPT 0
+kvmem_score: SELECT label=text_prefill_chunk n_blocks=1 budget_blocks=512 sink_blocks=64 recent_blocks=0 kept=1 runs=1 skip=0 window_tokens=64 sink_kept=1 recent_kept=0 scored_kept=0 candidates=0 kept_range=[0,0] sum_score=2.000 query_tokens=2 span_mode=abs span_abs=[3,48) chunk_abs=51 span_local=[0,2) oracle_ok=1 scale_floor=0.062500 harvest_layers=16/16
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+[ring] budgets: skeleton=4, evidence=0, recent=0, free=1034 (pool 1038) [skeleton+evidence+recent+free == pool: yes]
+2026-10-08 00:18:52.932  INFO  warmup complete | 868 ms
+2026-10-08 00:18:52.932  INFO  listening on http://127.0.0.1:8091 | model ninfer-local | auth disabled
+2026-10-08 00:18:52.932  INFO  api base http://127.0.0.1:8091/v1

@@ -1,0 +1,272 @@
+{
+  "artifact": {
+    "architecture": "Qwen3_5ForCausalLM",
+    "formats": [
+      "bf16",
+      "fp32",
+      "ptq1_g128_fp16"
+    ],
+    "name": "bonsai2-27b",
+    "path": "E:\\ship-next\\modelpack-ptq1-20261002\\bonsai2_27b_ternary_ptq1_native_mtp.ninfer",
+    "prefill_signature": "97ad7762bf1cdc0c9e4b00397a0949ccb69f040ced015424d53ae88730b16f18"
+  },
+  "corpus": {
+    "id": "custom-00.txt",
+    "mode": "custom",
+    "source": "E:\\infer-build\\publish-20261006\\fusion-engine-src\\eval\\corpora\\perplexity-1m\\data\\pg19\\00.txt",
+    "stream_count": 1
+  },
+  "domains": [
+    {
+      "domain": "custom",
+      "mean_nll": 2.2052842474573597,
+      "perplexity": 9.072830130259728,
+      "scored_tokens": 61425,
+      "total_nll": 135459.58490006832
+    }
+  ],
+  "execution": {
+    "context_tokens": 4096,
+    "device": 0,
+    "fast_prefill_kernel": false,
+    "kv_dtype": "rotated-k4e8g64-v4g32",
+    "prefill_chunk_tokens": 1024,
+    "purpose": "causal_scoring",
+    "rope_scaling_factor": 1.0,
+    "rope_scaling_original_context": 0,
+    "rope_yarn": false,
+    "rope_yarn_factor": 1.0,
+    "score_tile_tokens": 1024,
+    "stride_tokens": 4096,
+    "windows": "disjoint"
+  },
+  "metric": {
+    "log_base": "natural",
+    "name": "fixed-window truncated-context causal perplexity"
+  },
+  "overall": {
+    "mean_nll": 2.2052842474573597,
+    "perplexity": 9.072830130259728,
+    "scored_tokens": 61425,
+    "total_nll": 135459.58490006832
+  },
+  "schema_version": 4,
+  "streams": [
+    {
+      "domain": "custom",
+      "id": "00.txt",
+      "input_tokens": 65456,
+      "mean_nll": 2.2052842474573597,
+      "path": "E:\\infer-build\\publish-20261006\\fusion-engine-src\\eval\\corpora\\perplexity-1m\\data\\pg19\\00.txt",
+      "perplexity": 9.072830130259728,
+      "scored_tokens": 61425,
+      "seconds": 27.6020932,
+      "total_nll": 135459.58490006832,
+      "unscored_tokens": 1,
+      "windows": [
+        {
+          "first_target": 1,
+          "index": 0,
+          "input_begin": 0,
+          "input_end": 4096,
+          "mean_nll": 2.1450759765455367,
+          "perplexity": 8.54269025673395,
+          "scored_tokens": 4095,
+          "seconds": 1.9732996,
+          "target_begin": 1,
+          "target_end": 4096,
+          "total_nll": 8784.086123953974
+        },
+        {
+          "first_target": 1,
+          "index": 1,
+          "input_begin": 4096,
+          "input_end": 8192,
+          "mean_nll": 2.087127241627672,
+          "perplexity": 8.061722486007879,
+          "scored_tokens": 4095,
+          "seconds": 1.8287018,
+          "target_begin": 4097,
+          "target_end": 8192,
+          "total_nll": 8546.786054465316
+        },
+        {
+          "first_target": 1,
+          "index": 2,
+          "input_begin": 8192,
+          "input_end": 12288,
+          "mean_nll": 2.0513228416434868,
+          "perplexity": 7.778183608934564,
+          "scored_tokens": 4095,
+          "seconds": 1.8273771,
+          "target_begin": 8193,
+          "target_end": 12288,
+          "total_nll": 8400.167036530078
+        },
+        {
+          "first_target": 1,
+          "index": 3,
+          "input_begin": 12288,
+          "input_end": 16384,
+          "mean_nll": 2.129213569823964,
+          "perplexity": 8.408251707751807,
+          "scored_tokens": 4095,
+          "seconds": 1.8326686,
+          "target_begin": 12289,
+          "target_end": 16384,
+          "total_nll": 8719.129568429133
+        },
+        {
+          "first_target": 1,
+          "index": 4,
+          "input_begin": 16384,
+          "input_end": 20480,
+          "mean_nll": 2.1846948391632446,
+          "perplexity": 8.887935889539959,
+          "scored_tokens": 4095,
+          "seconds": 1.8295094,
+          "target_begin": 16385,
+          "target_end": 20480,
+          "total_nll": 8946.325366373487
+        },
+        {
+          "first_target": 1,
+          "index": 5,
+          "input_begin": 20480,
+          "input_end": 24576,
+          "mean_nll": 2.1208587906396827,
+          "perplexity": 8.338295263655612,
+          "scored_tokens": 4095,
+          "seconds": 1.8306046,
+          "target_begin": 20481,
+          "target_end": 24576,
+          "total_nll": 8684.9167476695
+        },
+        {
+          "first_target": 1,
+          "index": 6,
+          "input_begin": 24576,
+          "input_end": 28672,
+          "mean_nll": 2.1321361374405927,
+          "perplexity": 8.432861336039966,
+          "scored_tokens": 4095,
+          "seconds": 1.8298985,
+          "target_begin": 24577,
+          "target_end": 28672,
+          "total_nll": 8731.097482819227
+        },
+        {
+          "first_target": 1,
+          "index": 7,
+          "input_begin": 28672,
+          "input_end": 32768,
+          "mean_nll": 2.2028313034310463,
+          "perplexity": 9.050602258797515,
+          "scored_tokens": 4095,
+          "seconds": 1.8324328,
+          "target_begin": 28673,
+          "target_end": 32768,
+          "total_nll": 9020.594187550134
+        },
+        {
+          "first_target": 1,
+          "index": 8,
+          "input_begin": 32768,
+          "input_end": 36864,
+          "mean_nll": 2.2953514214649067,
+          "perplexity": 9.927924285018216,
+          "scored_tokens": 4095,
+          "seconds": 1.8296702,
+          "target_begin": 32769,
+          "target_end": 36864,
+          "total_nll": 9399.464070898794
+        },
+        {
+          "first_target": 1,
+          "index": 9,
+          "input_begin": 36864,
+          "input_end": 40960,
+          "mean_nll": 2.272376197092756,
+          "perplexity": 9.70242832626558,
+          "scored_tokens": 4095,
+          "seconds": 1.8323803,
+          "target_begin": 36865,
+          "target_end": 40960,
+          "total_nll": 9305.380527094836
+        },
+        {
+          "first_target": 1,
+          "index": 10,
+          "input_begin": 40960,
+          "input_end": 45056,
+          "mean_nll": 2.2268581561666925,
+          "perplexity": 9.270693204896794,
+          "scored_tokens": 4095,
+          "seconds": 1.8315214,
+          "target_begin": 40961,
+          "target_end": 45056,
+          "total_nll": 9118.984149502605
+        },
+        {
+          "first_target": 1,
+          "index": 11,
+          "input_begin": 45056,
+          "input_end": 49152,
+          "mean_nll": 2.0894219569366306,
+          "perplexity": 8.080243085637827,
+          "scored_tokens": 4095,
+          "seconds": 1.8319711,
+          "target_begin": 45057,
+          "target_end": 49152,
+          "total_nll": 8556.182913655502
+        },
+        {
+          "first_target": 1,
+          "index": 12,
+          "input_begin": 49152,
+          "input_end": 53248,
+          "mean_nll": 2.325561560630795,
+          "perplexity": 10.232424599506327,
+          "scored_tokens": 4095,
+          "seconds": 1.8282908,
+          "target_begin": 49153,
+          "target_end": 53248,
+          "total_nll": 9523.174590783106
+        },
+        {
+          "first_target": 1,
+          "index": 13,
+          "input_begin": 53248,
+          "input_end": 57344,
+          "mean_nll": 2.3697304389307083,
+          "perplexity": 10.694509072226612,
+          "scored_tokens": 4095,
+          "seconds": 1.8322133,
+          "target_begin": 53249,
+          "target_end": 57344,
+          "total_nll": 9704.04614742125
+        },
+        {
+          "first_target": 1,
+          "index": 14,
+          "input_begin": 57344,
+          "input_end": 61440,
+          "mean_nll": 2.4467032803226862,
+          "perplexity": 11.550206092587592,
+          "scored_tokens": 4095,
+          "seconds": 1.8312405,
+          "target_begin": 57345,
+          "target_end": 61440,
+          "total_nll": 10019.2499329214
+        }
+      ]
+    }
+  ],
+  "timing": {
+    "load_seconds": 2.7617547,
+    "read_and_tokenize_seconds": 0.0216457,
+    "score_seconds": 27.6022248,
+    "scored_tokens_per_second": 2225.364094563856,
+    "total_seconds": 30.459942
+  }
+}
