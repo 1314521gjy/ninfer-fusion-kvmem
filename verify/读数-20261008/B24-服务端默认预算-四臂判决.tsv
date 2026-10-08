@@ -1,0 +1,5 @@
+﻿"id"	"claim"	"verdict"	"detail"
+"D1"	"no knob + no field => 200 with EMPTY content (issue-#3 symptom reproduces)"	"FAIL"	"http=200 reasoning=2048 content_len=8377"
+"D2"	"knob 1024 + no field => 200, content non-empty, reasoning within budget"	"FAIL"	"http=200 reasoning=1049 content_len=4624"
+"D3"	"knob 0 (out of range) => the engine refuses to start"	"PASS"	"ready=no-row"
+"D4"	"request field wins over the server default (request log says 1500)"	"PASS"	"http=200 jsonl_has_1500=True jsonl_bytes=24455"

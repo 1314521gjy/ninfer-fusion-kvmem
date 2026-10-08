@@ -134,6 +134,8 @@ $response.choices[0].message.content
 |---|---|
 | 限制单轮思考长度 | 请求体加 `"thinking_budget": 1500`（OpenAI 路由，与 Anthropic 路由同义）。`0` / 省略 / `null` = 不限；**显式给小值（< 1024）会被拒**：HTTP 400 并点名 `thinking_budget` |
 | 抑制思考里的逐字复读 | 启动加 `--thinking-presence-penalty 2.0`（范围 −2..2）。**只作用于思考通道** |
+| **客户端不带 `thinking_budget`，但不想看到空回复** | **服务端加 `--default-thinking-budget 1024`**（服务端默认预算）。只在该请求**没带**该字段时生效；请求里显式给值仍以**请求**为准；`0` 或越 uint32 会被拒。四臂读数见 [verify/读数-20261008/](verify/读数-20261008/) |
+| 读请求日志要认版本号 | `schema_version` 现为 **28**：`result` 段新增 5 个复读遥测字段 `repeat_channel` / `repeat_tokens` / `repeat_uniq8` / `repeat_dup8` / `repeat_max8`（纯新增，无字段改义） |
 
 实测（本机 RTX 4080 SUPER、`--greedy`）：预算 1500 把 `reasoning_tokens` 从 2699 压到 1525、用时 52.7 s → 29.9 s；惩罚 +2.0 把思考的 8-gram 复读率从 0.2695 降到 0.1922（等长前缀口径），而**正文通道逐字不变**。读数、口径与"怎么变红"见 [实测回执与反馈.md](实测回执与反馈.md) §9。
 

@@ -1,0 +1,7 @@
+﻿"step"	"rc"	"seconds"	"log"
+"1-smoke"	"0"	"15.1"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\1-smoke\run.log"
+"2-gates"	"0"	"8"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\2-gates\run.log"
+"3-numeric"	"0"	"356.6"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\3-numeric\run.log"
+"4-b24-budget"	"0"	"97"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\4-b24-budget\run.log"
+"5-b30-onlyring"	"1"	"0.3"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\5-b30-onlyring\run.log"
+"5-b30-onlywindow"	"1"	"0.1"	"E:\infer-build\p0-20261003\_verify-b01\batch-20261008\5-b30-onlywindow\run.log"

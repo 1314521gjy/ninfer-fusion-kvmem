@@ -1,0 +1,5 @@
+﻿"arm"	"rep"	"exe"	"extra"	"body"	"ready"	"http"	"reasoning_tokens"	"content_len"	"resp_sha"	"channel"	"chars"	"tokens"	"dup8"	"distinct1"
+"D1-noknob-nofield"	"1"	"ninfer-serve.exe"	""	"D1-nofield"	"1"	"200"	"2048"	"8377"	"DFA7C5DA2EC76215"	"reasoning_content"	"7614"	"1518"	"0.2522"	"0.1568"
+"D2-knob1024-nofield"	"1"	"ninfer-serve.exe"	"--default-thinking-budget 1024"	"D2-nofield"	"1"	"200"	"1049"	"4624"	"61C185641001A12F"	"reasoning_content"	"3942"	"791"	"0.2883"	"0.1997"
+"D3-knob0-nofield"		"ninfer-serve.exe"	"--default-thinking-budget 0"	"D3-nofield"	"0"	""	""	""	""					
+"D4-knob1024-req1500"	"1"	"ninfer-serve.exe"	"--default-thinking-budget 1024 --request-log-jsonl E:\infer-build\p0-20261003\_verify-b01\batch-20261008\b24\D4-requestlog.jsonl"	"D4-req1500"	"1"	"200"	"1525"	"6441"	"3F4E117306CF8AB3"	"reasoning_content"	"5714"	"1139"	"0.258"	"0.1809"

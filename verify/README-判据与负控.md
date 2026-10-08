@@ -114,6 +114,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
   **2026-10-07 深夜补入**：`B29-15臂-复跑.tsv`（B29 修复后那一族 15 条臂 **15/15 PASS**）· `四项验收闸门-B29后.tsv`（**4/4 PASS**）· `S2-配对重复-每臂3次.tsv` + `S2-判据结论.tsv`（S2 运行时统计与 C8–C11）· `B30-环两门矩阵.tsv`（**只设 `NINFER_KV_RING` ⇒ CLI 放行 + 引擎 FATAL；只设 `NINFER_KV_WINDOW` ⇒ CLI 拒；两个都设 ⇒ 200**）· `B24-空响应三臂.tsv`（不带预算 ⇒ `content` 空；带 `thinking_budget:1024` ⇒ 非空）。
   **2026-10-07 深夜再补**：`B24-遥测-两臂.tsv`（引擎自报的 `repeat_dup8`：无惩罚 **0.23829** vs `--thinking-presence-penalty 2.0` **0.19222**，与 §9.2 的离线读数吻合 ⇒ 遥测本身的验证见回执 §11）。
   原始**大**日志（JUnit XML、ctest 控制台全文、引擎 `err.log`、E2/E5 harness 臂日志）留在本机未随仓发布；需要时按 §8.7 的**复现仪**与本节第 7 条重跑。
+- **`读数-20261008/`（2026-10-08 全量重编后的回归批，12 件）** —— `批-五步汇总.tsv`（五步 rc 与耗时）· `件身份-体积与sha256.tsv`（新件 `9FA7490BCBC4825A…` = **795,030,528 B，比旧件小 47.4%**，这是关掉 `-lineinfo` 的直接判据）· `冒烟-池64.tsv`（http=200）· `四项验收闸门-直跑四条.tsv`（**4/4 rc=0**）· `数值不变性子集14条.tsv`（**14/14 passed**，不含 415 s 的 wide 臂）· `B24-服务端默认预算-四臂判决.tsv` + `B24-真实响应-D{1,2,4}*.json`（D1 无旋钮 ⇒ `finish=length` / `reasoning=2048` / **content 0 字符**（issue #3 症状复现）；D2 `--default-thinking-budget 1024` ⇒ content 非空、reasoning 1049；D3 `=0` ⇒ 拒绝启动；D4 旋钮 1024 + 请求 1500 ⇒ reasoning 1525 = **请求优先**）· `B30-只设RING.tsv`（http=-1，CLI 拒绝并点名正确变量）· `B30-只设WINDOW.tsv`（http=200）。
+  ⚠️ **B24 的读法**：仪器内联的那个 `content_len` 量的是 **JSON 尾巴长度**、不是正文（实测会把"content 为空"的正确答案显示成 8377 字符）⇒ **必须解析引擎返回的 JSON**；本目录的 `B24-真实响应-*.json` 就是原始证据。
+  ⚠️ **闸门口径**：ctest 子集要求**每个注册用例的可执行文件都存在**。只编 `ninfer-serve`/`ninfer_tests` 时 `ninfer_failure_class_test.exe` 不存在，ctest 记成 `Not Run`（看着像失败，其实是构建范围问题）⇒ 本目录的闸门读数用**直跑四条 exe 的 rc**。另：`tests\` 可能没有 FFmpeg/curl 运行库（staging 是 ALL 目标）⇒ 跑测试时 `PATH` 要含 `apps\`。
 
 ## 6. 2026-10-07 深夜补记（跑测试的两条操作事实 + 判据指针）
 

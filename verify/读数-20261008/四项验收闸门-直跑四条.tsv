@@ -1,0 +1,5 @@
+﻿"name"	"rc"
+"ninfer_failure_class_test"	"0"
+"ninfer_qwen3_5_context_store_test"	"0"
+"ninfer_qwen3_5_vision_cpu_test"	"0"
+"ninfer_hadamard_transform_test"	"0"
