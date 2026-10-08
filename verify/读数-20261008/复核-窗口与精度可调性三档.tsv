@@ -1,0 +1,4 @@
+﻿"arm"	"window"	"dtype"	"ready"	"weights"	"capacity"	"pages"	"runtime"	"budgets"	"seconds"
+"R5-w65536-rk4v4e8"	"65536"	"rk4v4-e8"	"True"	"5.52 GiB"	"KV 66,432 tokens, rk4v4-e8, auto"	"1,038/1,038"	"1.32 GiB"	"skeleton=33, evidence=0, recent=0, free=1005 (pool 1038) [skeleton+evidence+recent+free == pool: yes]"	"5.1"
+"R6-w32768-rk4v4e8"	"32768"	"rk4v4-e8"	"True"	"5.52 GiB"	"KV 33,664 tokens, rk4v4-e8, auto"	"526/526"	"790.8 MiB"	"skeleton=33, evidence=0, recent=0, free=493 (pool 526) [skeleton+evidence+recent+free == pool: yes]"	"5.1"
+"R7-w65536-rk2v4e8"	"65536"	"rk2v4-e8"	"True"	"5.52 GiB"	"KV 66,432 tokens, rk2v4-e8, auto"	"1,038/1,038"	"1.07 GiB"	"skeleton=33, evidence=0, recent=0, free=1005 (pool 1038) [skeleton+evidence+recent+free == pool: yes]"	"5.1"

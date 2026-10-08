@@ -1,0 +1,29 @@
+﻿=============================== VERDICT ===============================
+     turn1: hit=3  SILENT_WRONG=0  bad=0  rejected400=0 / 3
+     turn2: hit=3  SILENT_WRONG=0  bad=0   <- the checkpoint path only runs on a follow-up turn
+     counters: hidden=104850  mid_hidden=43992  lines=300
+     NEEDLE page=281  masked-out on 216 of 300 mask lines
+     turn1: hit=3  SILENT_WRONG=0  bad=0  rejected400=0 / 3
+     turn2: hit=3  SILENT_WRONG=0  bad=0   <- the checkpoint path only runs on a follow-up turn
+     counters: hidden=105050  mid_hidden=44070  lines=300
+     NEEDLE page=281  masked-out on 216 of 300 mask lines
+     turn1: hit=3  SILENT_WRONG=0  bad=0  rejected400=0 / 3
+     turn2: hit=3  SILENT_WRONG=0  bad=0   <- the checkpoint path only runs on a follow-up turn
+     counters: hidden=470840  mid_hidden=204194  lines=1684
+     NEEDLE page=281  masked-out on 928 of 1684 mask lines
+     turn1: hit=0  SILENT_WRONG=3  bad=0  rejected400=0 / 3
+     turn2: hit=0  SILENT_WRONG=3  bad=0   <- the checkpoint path only runs on a follow-up turn
+     counters: hidden=142038  mid_hidden=61842  lines=375
+     NEEDLE page=281  masked-out on 270 of 375 mask lines
+     turn1: hit=3  SILENT_WRONG=0  bad=0  rejected400=0 / 3
+     turn2: hit=3  SILENT_WRONG=0  bad=0   <- the checkpoint path only runs on a follow-up turn
+     counters: hidden=104884  mid_hidden=43184  lines=302
+     NEEDLE page=281  masked-out on 216 of 302 mask lines
+  NO-RETRIEVE CONTROL (NINFER_KV_RETRIEVE=0, same body/pool): turn1 hit=0 SILENT_WRONG=3 bad=0 / 3
+     counters: hidden=142038  mid_hidden=61842  lines=375
+  FITS arm : pool=16384  turn1 hit=2 silent=0 / 2
+     counters: hidden=0  mid_hidden=0  lines=0
+  INSTRUMENT CHECK  : some over-pool arm hid pages, and the fits arm hid none.
+                      -> INSTRUMENT LIVE (witnesses the hide)
+  REPRODUCTION GATE : an over-pool arm must show SILENT_WRONG > 0 before any fix can be called effective.
+                      -> GATE RED -- defect reproduced, the fix is now testable

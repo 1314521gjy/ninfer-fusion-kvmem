@@ -1,0 +1,2 @@
+﻿"arm"	"ready"	"http"	"completion_tokens"	"decode_avg"	"decode_max"	"req_done"	"throughput_tail"
+"PQ2-mtp-dflash2-12"	"True"	"200"	"292"	"206.4"	"206.4"	"openai-chat | stop token | prompt 38 | output 292 | cache 0 (0.0%) | TTFT 68.8 ms | total 1.5s | prefill 557.9 tok/s | decode 206.4 tok/s | mtp accepted 243/576 (42.2%)"	""
