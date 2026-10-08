@@ -33,6 +33,7 @@ rem -- 8 GB tier switches ------------------------------------------------------
 rem  WINDOW = the device-resident working set, in tokens. 65536 fits 8 GB with rk4v4-e8;
 rem  raise to 98304 only if the card has headroom, lower to 32768 if startup is refused.
 if "%NINFER_KV_WINDOW%"=="" set NINFER_KV_WINDOW=65536
+rem  history switch: the new binary no longer reads NINFER_KV_RING; the ring gate is NINFER_KV_WINDOW (B30)
 set NINFER_KV_RING=1
 set NINFER_HOST_PAGEABLE=1
 set NINFER_KV_REUSE_HOSTBACKED=1

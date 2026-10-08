@@ -267,6 +267,7 @@ git diff --no-index --stat "<上游树>" "<你的树>"
 ```bat
 set NINFER_KV_WINDOW=16384
 set NINFER_KV_RETRIEVE=8192
+rem 历史开关：新件已不再读取 NINFER_KV_RING；环的门是 NINFER_KV_WINDOW（B30）
 set NINFER_KV_RING=1
 set NINFER_HOST_PAGEABLE=1
 set NINFER_KV_REUSE_HOSTBACKED=1
