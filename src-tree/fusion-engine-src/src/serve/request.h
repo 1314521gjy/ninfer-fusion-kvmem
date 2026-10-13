@@ -207,6 +207,11 @@ struct GenerationRequest {
     int max_tokens                       = 0; // resolved budget; zero means immediate output limit
     std::optional<bool> enable_thinking;      // unset => use the server default
     std::optional<std::uint32_t> thinking_budget;
+    // feat/anti-loop: per-request thinking-channel presence. Resolution order:
+    // request.thinking_presence_penalty > server --thinking-presence-penalty > 0.
+    // Explicit 0 disables the thinking-channel presence for this request
+    // (adaptive-guard pattern: pay the tax only on rounds that need it).
+    std::optional<float> thinking_presence_penalty;
     std::optional<RequestedReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
     std::string chat_template_kwargs_json;

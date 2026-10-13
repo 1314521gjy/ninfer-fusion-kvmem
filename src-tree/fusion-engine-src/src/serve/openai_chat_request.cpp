@@ -981,6 +981,24 @@ void parse_thinking_budget(const Json& body, GenerationRequest& output) {
     output.thinking_budget = static_cast<std::uint32_t>(parsed);
 }
 
+// feat/anti-loop: per-request thinking-channel presence (adaptive guard).
+// Optional float in [-2, 2]; unset => fall back to the server default.
+void parse_thinking_presence_penalty(const Json& body, GenerationRequest& output) {
+    if (!body.contains("thinking_presence_penalty") ||
+        body.at("thinking_presence_penalty").is_null()) { return; }
+    const Json& value = body.at("thinking_presence_penalty");
+    if (!value.is_number()) {
+        bad_request("thinking_presence_penalty must be a number or null",
+                    "thinking_presence_penalty");
+    }
+    const float penalty = value.get<float>();
+    if (!(penalty >= -2.0F && penalty <= 2.0F)) {
+        bad_request("thinking_presence_penalty must be within [-2, 2]",
+                    "thinking_presence_penalty");
+    }
+    output.thinking_presence_penalty = penalty;
+}
+
 void parse_stream_options(const Json& body, OpenAIChatRequest& output) {
     output.stream = get_bool(body, "stream", false);
     if (!body.contains("stream_options") || body.at("stream_options").is_null()) { return; }
@@ -1054,6 +1072,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);
     parse_thinking_budget(body, output.generation);
+    parse_thinking_presence_penalty(body, output.generation);
     const TemplateOptions template_options      = parse_template_options(body);
     output.generation.enable_thinking           = template_options.enable_thinking;
     output.generation.preserve_thinking         = template_options.preserve_thinking;
