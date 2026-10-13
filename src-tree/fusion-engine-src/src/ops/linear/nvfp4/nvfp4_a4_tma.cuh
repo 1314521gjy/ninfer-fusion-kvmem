@@ -441,11 +441,11 @@ void launch_nvfp4_a4_tma_mma(const Nvfp4A4Operands& p, Output output, Epilogue e
 #ifdef NINFER_TMA_STAGED_DESCRIPTORS
         // Windows: the descriptors are staged into a device buffer and pointer-passed, because MSVC
         // cannot pass the alignas(128) CUtensorMap struct by value (see the kernel parameter).
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(
+        nvfp4_a4_tma_kernel<Schedule, Epilogue, Output, Rows><<<grid, Schedule::kThreads, bytes, stream>>>(
             nvfp4_a4_tma_staging().stage(descriptors, stream), p.alpha, epilogue, output,
             offset + count, p.rows, p.k, offset);
 #else
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(descriptors, p.alpha, epilogue, output,
+        nvfp4_a4_tma_kernel<Schedule, Epilogue, Output, Rows><<<grid, Schedule::kThreads, bytes, stream>>>(descriptors, p.alpha, epilogue, output,
                                                             offset + count, p.rows, p.k, offset);
 #endif
         CUDA_CHECK(cudaGetLastError());
