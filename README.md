@@ -46,6 +46,20 @@ KVMem 环保留常驻窗口，将其他页降到主机层；需要时按内容�
 
 **这一版与下方旧口径的关系**：下方"获取与启动 / 8 GB 档 / 实测结果"记录的是**旧线（PQ2 + dflash2 + `start-8g.bat`）**，仍然有效但**不要与新线配方混用**；新线的两套 8 GB 配方见"当前边界与排错"里新增的小节。
 
+### 另支持：Qwen4 预览架构（`Qwen4Exp` / `qwen3_8_flash_next`）
+
+本版同时支持 **Qwen4 预览架构** —— 即 Qwen3.8-Flash-Next。artifact 里 `architectures = Qwen4ExpForConditionalGeneration`、`model_type = qwen4_exp` 会被识别成 `Architecture::Qwen4Exp`（`src/models/registry.cpp:15-20`，实现目录 `src/models/qwen3_8_flash_next/`）。
+
+**它与本文主线的 27B ternary 是两条不同架构线，配方与 env 不可混用；本轮三 arch 引擎只针对 27B 线构建。**
+
+| | Qwen4 预览线（`Qwen4Exp`） | 本文主线（`qwen3_5` / 27B ternary） |
+|---|---|---|
+| 实现目录 | `src/models/qwen3_8_flash_next/` | `src/models/qwen3_5/` |
+| 几何 | **48 层 × 每层 512 专家 = 24,576 专家，router top-10**；每专家帧 2,764,800 B ⇒ 主专家库 **63.3 GiB**（离线闭合验证：48 × 512 × 2,764,800 B = 63.28 GiB） | 64 层 = 3×linear_attention + 1×full_attention ⇒ **16 层带 KV**，25,728 B/token |
+| 投机头 | 草稿头名为 `Qwen4ExpMTP` | `--spec mtp --draft-tokens 1 --mtp-attention-window 8` |
+| 运行前提 | 需 `NINFER_FLASH_NEXT_EXPERTS_HOST=1`、`NINFER_LINEAR_ROUTES=legacy`、`NINFER_FLASH_NEXT_EXPERTS_SLOTS>=96`；**禁设** `NINFER_HOST_PAGEABLE`、`NINFER_FLASH_NEXT_MOE_WIDE_ARM` | 见下方启动模板与新 8 GB 配方 |
+| 本轮状态 | 可识别、可加载（更早的移植线，`docs/17–22` 有契约/清单/蓝图/进度台账/接线勘察）；**本轮三 arch 引擎未对它构建** | 本轮主线：三 arch、8 GB 两档、分段注入网关均在本机验过 |
+
 ## 从哪里开始
 
 | 你的目标 | 入口 |
