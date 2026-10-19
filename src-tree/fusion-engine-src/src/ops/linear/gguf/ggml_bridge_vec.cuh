@@ -124,6 +124,32 @@ struct Decoder<GGML_TYPE_IQ4_NL> {
 };
 
 template <>
+struct Decoder<GGML_TYPE_Q2_0> {
+    // Block-5: 64 values per block, one binary16 scale, 2-bit codes four per byte. `u` selects
+    // which 32-value half (bytes 8*u .. 8*u+7 of the block) this slice decodes; the scale is the
+    // single block scale and is shared by both halves. Semantics (code c -> symbol c - 1, so
+    // {-1, 0, +1, +2}, low code first) are llama.cpp's dequantize_q2_0 / vec_dot_q2_0_q8_1 taken
+    // verbatim; the codes map through plain arithmetic, no value table.
+    static constexpr int kBlockElems = 64, kBlockBytes = 18, kTableWords = 0;
+    __device__ static const std::uint32_t* table() { return nullptr; }
+    __device__ __forceinline__ static void decode(const std::uint8_t* b, int u,
+                                                  const std::uint32_t*, Slice& s) {
+        s.f[0] = half_at(b);
+        const std::uint8_t* qs = b + 8 * u;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const std::uint32_t x = qs[j];
+            s.w[j] = (static_cast<int>(x & 3U) - 1) | ((static_cast<int>((x >> 2) & 3U) - 1) << 8) |
+                     ((static_cast<int>((x >> 4) & 3U) - 1) << 16) |
+                     ((static_cast<int>((x >> 6) & 3U) - 1) << 24);
+        }
+    }
+    __device__ __forceinline__ static float dot(const Slice& s, const int* a, float d, float) {
+        return s.f[0] * d * float(dot4(s.w + 4, a + 4, dot4(s.w, a, 0)));
+    }
+};
+
+template <>
 struct Decoder<GGML_TYPE_IQ4_XS> {
     static constexpr int kBlockElems = 256, kBlockBytes = 136, kTableWords = 0;
     __device__ static const std::uint32_t* table() { return nullptr; }

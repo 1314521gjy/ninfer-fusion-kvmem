@@ -52,6 +52,16 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      Tensor& ssm_state, Tensor& out, cudaStream_t stream);
 
+namespace detail::gated_delta_net::chunked {
+// Per-stage instrumentation hook, copied from the upstream ops layer
+// (upstream include/ninfer/ops/gated_delta_net.h:55-60). The qwen3_8_flash_next target records
+// its stage ledger through this, so the chunked path reports each stage boundary.
+struct GdnChunkedStageHook {
+    void (*record_stage)(void* user_data, int stage_id, cudaStream_t stream) = nullptr;
+    void* user_data = nullptr;
+};
+}
+
 /**
  * Distinct-state form of the same recurrence. `ssm_state_out` receives the final state;
  * `ssm_state_in` and `ssm_state_out` may be disjoint or exactly the same storage. No other
@@ -60,7 +70,8 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                     cudaStream_t stream);
+                     cudaStream_t stream,
+                     const detail::gated_delta_net::chunked::GdnChunkedStageHook* hook = nullptr);
 
 /**
  * One-token update for B independent state-pool slots. q/k are contiguous BF16 [128,Hqk,1,B],

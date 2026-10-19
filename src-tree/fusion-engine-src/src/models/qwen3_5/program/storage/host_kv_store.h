@@ -209,9 +209,10 @@ public:
                 // give-up path (abort) leaves the store exactly as it was -- this is the same-page-twice
                 // case, and it is the one the field actually hit.
                 std::fprintf(stderr,
-                             "[ninfer] publish declined: page=%u of %u epoch=%u coverage=%u "
+                             "[ninfer] publish declined: page=%u of %u epoch=%llu coverage=%u "
                              "reason=host-replica-not-attachable\n",
-                             index, extent.page_count, entry.epoch, entry.coverage);
+                             index, extent.page_count,
+                             static_cast<unsigned long long>(entry.epoch), entry.coverage);
                 abort(reservation);
                 return std::nullopt;
             }

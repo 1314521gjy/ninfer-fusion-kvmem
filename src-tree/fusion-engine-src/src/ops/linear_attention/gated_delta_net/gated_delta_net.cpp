@@ -243,7 +243,8 @@ TwoStageWorkspace allocate_two_stage_workspace(Allocator& allocator, std::int32_
 void run_two_stage(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                    const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                    const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                   cudaStream_t stream) {
+                   cudaStream_t stream,
+                   const detail::gated_delta_net::chunked::GdnChunkedStageHook* hook = nullptr) {
     namespace two_stage       = detail::gated_delta_net::two_stage;
     auto scratch_scope        = ws.scope();
     TwoStageWorkspace scratch = allocate_two_stage_workspace(ws, q.ne[1], v.ne[1], q.ne[2]);
@@ -276,7 +277,13 @@ void run_two_stage(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
         q.ne[2],
         scale};
     two_stage::launch_prepare(args, qk, control, normalize_qk, stream);
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 0, stream);
+    }
     two_stage::launch_recurrence(args, qk, control, stream);
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 1, stream);
+    }
     if (staged) {
         if (ssm_state_out.dtype == DType::FP16) {
             detail::gated_delta_net::narrow_state_fp32_to_fp16(scratch.state_fp32, ssm_state_out,
@@ -285,6 +292,11 @@ void run_two_stage(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
             CUDA_CHECK(cudaMemcpyAsync(ssm_state_out.data, scratch.state_fp32.data,
                                        ssm_state_out.bytes(), cudaMemcpyDeviceToDevice, stream));
         }
+    }
+    // Stage 2 is reported after the FP16 state write-back: this path folds the narrowing into
+    // the recurrence stage, so the ledger boundary must not close before it lands.
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 2, stream);
     }
 }
 
@@ -338,11 +350,12 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                     cudaStream_t stream) {
+                     cudaStream_t stream,
+                     const detail::gated_delta_net::chunked::GdnChunkedStageHook* hook) {
     validate_chunked(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
     if (two_stage_route(v.ne[1], q.ne[2])) {
         run_two_stage(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state_in, ssm_state_out, out,
-                      stream);
+                      stream, hook);
         return;
     }
 
@@ -380,14 +393,14 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
             detail::gated_delta_net::launch_chunked(q_full, k_full, v_full, g_full, beta_full,
                                                     scale, scratch.state_fp32, scratch.state_fp32,
                                                     out_full, scratch.stage.data,
-                                                    scratch.stage.bytes, stream);
+                                                    scratch.stage.bytes, stream, hook);
             detail::gated_delta_net::narrow_state_fp32_to_fp16(scratch.state_fp32, ssm_state_out,
                                                                stream);
         } else {
             detail::gated_delta_net::launch_chunked(q_full, k_full, v_full, g_full, beta_full,
                                                     scale, ssm_state_in, ssm_state_out, out_full,
                                                     scratch.stage.data, scratch.stage.bytes,
-                                                    stream);
+                                                    stream, hook);
         }
     }
 

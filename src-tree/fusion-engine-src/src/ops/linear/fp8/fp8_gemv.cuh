@@ -11,6 +11,7 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_output.cuh"
+#include "ops/linear/fp8/fp8_scale.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -93,10 +94,11 @@ __device__ __forceinline__ void accumulate_rows(const Fp8CodePack<Values> (&code
 }
 
 template <class Geometry, class Schedule, class Output, class RowPolicy = Fp8GemvIdentityRows,
-          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue>
+          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue,
+          class Scale = Fp8DefaultScale>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_gemv_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
-    const __nv_bfloat16* __restrict__ row_scales, Output output, RowPolicy row_policy = {},
+    const Scale* __restrict__ row_scales, Output output, RowPolicy row_policy = {},
     Epilogue epilogue = {}) {
     constexpr int kValuesPerPhase = kWarpSize * Schedule::kValuesPerLane;
     static_assert((Geometry::kInputRows % kValuesPerPhase) == 0);
@@ -146,10 +148,10 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
                 const int gate_row = row_policy.weight_row(row_begin, local_row);
                 const int up_row = row_policy.weight_row(row_begin, kStoredRowsPerWarp + local_row);
                 const float gate = epilogue.apply(
-                    gate_row, 0, totals[local_row] * __bfloat162float(row_scales[gate_row]));
+                    gate_row, 0, totals[local_row] * fp8_row_scale(row_scales[gate_row]));
                 const float up = epilogue.apply(up_row, 0,
                                                 totals[kStoredRowsPerWarp + local_row] *
-                                                    __bfloat162float(row_scales[up_row]));
+                                                    fp8_row_scale(row_scales[up_row]));
                 output.store_pair(row_begin + local_row, 0, gate, up);
             }
         }
@@ -165,7 +167,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
             if (lane == 0) {
                 const int parent_row = row_policy.weight_row(row_begin, local_row);
                 const float value =
-                    epilogue.apply(parent_row, 0, total * __bfloat162float(row_scales[parent_row]));
+                    epilogue.apply(parent_row, 0, total * fp8_row_scale(row_scales[parent_row]));
                 output.store(parent_row, 0, value);
             }
         }

@@ -32,6 +32,13 @@ struct Bf16Geometry {
     static constexpr std::int32_t kInputRows  = InputRows;
 };
 
+// Upstream spells this same type `Bf16GemvGeometry` (upstream ops/linear/bf16/bf16_config.h:28)
+// and the ported qwen3_8_flash_next kernels name it that way. Same template parameters, same
+// members, so it is an alias rather than a second definition: one geometry, two accepted names.
+// This tree's own 10 call sites keep using `Bf16Geometry`.
+template <std::int32_t OutputRows, std::int32_t InputRows>
+using Bf16GemvGeometry = Bf16Geometry<OutputRows, InputRows>;
+
 template <int WarpsPerCta, int WarpsPerRow, int RowsPerWarp, int ValuesPerLane,
           int AccumulatorChains, Bf16ActivationAccess ActivationAccess, Bf16WeightCache WeightCache,
           Bf16PhaseOrder PhaseOrder, int PhaseStride, int PrefetchDepth, int PhaseUnroll,

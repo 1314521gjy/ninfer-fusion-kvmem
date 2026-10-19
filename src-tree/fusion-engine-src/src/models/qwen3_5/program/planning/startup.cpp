@@ -1568,16 +1568,138 @@ std::uint32_t effective_prefill_chunk(const execution::Parameters& parameters,
     return std::min(aligned, options.max_context);
 }
 
+// NINFER_PREFILL_CHUNK_AUTO (default ON; "0" restores the manual behaviour byte for byte):
+// in RING mode a step's Device demand must fit the pool, so clamp the effective chunk to the pages the
+// ring can actually free. The slack is the ring's own restore slack -- the same constant the rejection
+// message names (storage\context.cpp:2326 kRingSlackPages); no new constant is invented here.
+std::uint32_t auto_clamped_prefill_chunk(const execution::Parameters& parameters,
+                                         const EngineOptions& options) {
+    const std::uint32_t requested = effective_prefill_chunk(parameters, options);
+    static const bool auto_on = [] {
+        const char* value = std::getenv("NINFER_PREFILL_CHUNK_AUTO");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!auto_on || !ring_requested() ||
+        options.kv_capacity.mode == KvCapacityMode::Automatic || options.kv_capacity.explicit_tokens == 0) {
+        return requested;
+    }
+    constexpr std::uint32_t kRingSlackPages = 8U;   // == storage\context.cpp:2326 kRingSlackPages
+    constexpr std::uint32_t kChunkAlignment = 128U; // --prefill-chunk must stay a multiple of 128
+    const std::uint32_t usable_pages =
+        std::max(1U, options.kv_capacity.explicit_tokens / static_cast<std::uint32_t>(kPagedKVPageSize));
+    const std::uint32_t room_pages = usable_pages > kRingSlackPages ? usable_pages - kRingSlackPages : 0U;
+    std::uint32_t max_chunk = room_pages * static_cast<std::uint32_t>(kPagedKVPageSize);
+    max_chunk = std::max(kChunkAlignment, (max_chunk / kChunkAlignment) * kChunkAlignment);
+    if (requested <= max_chunk) { return requested; }
+    std::fprintf(stderr,
+                 "[ninfer] prefill_chunk auto-clamp: requested=%u effective=%u usable_pages=%u slack=%u\n",
+                 requested, max_chunk, usable_pages, kRingSlackPages);
+    return max_chunk;
+}
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options) {
     validate_target_options(parameters, device, options);
+    // NINFER_KV_DTYPE_AUTO (default OFF, zero regression when unset/0): pick the BEST-quality tier that
+    // is FEASIBLE, where feasibility includes BOTH device pages and the ring Host tier. Order is by page
+    // size, largest first = best quality: k8v4 -> nvfp4 -> rk4v4 -> rk2v4-e8.
+    KvCacheStorage kv_storage_choice = options.kv_cache;
+    {
+        const auto auto_tier_on = [] {
+            const char* text = std::getenv("NINFER_KV_DTYPE_AUTO");
+            return text != nullptr && text[0] != (char)0 && std::strtol(text, nullptr, 10) > 0;
+        }();
+        if (auto_tier_on) {
+            const std::int32_t head_dim = parameters.model.config().text.attention->head_dim;
+            const bool ring_mode = ring_requested() &&
+                                   options.kv_capacity.mode == KvCapacityMode::Explicit &&
+                                   options.kv_capacity.explicit_tokens != 0 &&
+                                   options.kv_capacity.explicit_tokens < options.max_context;
+            const std::uint32_t pool_tokens =
+                ring_mode ? options.kv_capacity.explicit_tokens : options.max_context;
+            const std::uint64_t pool_pages_req =
+                (static_cast<std::uint64_t>(pool_tokens) + 63U) / 64U;
+            const std::uint64_t logical_pages =
+                (static_cast<std::uint64_t>(options.max_context) + 63U) / 64U;
+            constexpr std::uint64_t kAutoBaseBytes = 496205824U;  // 473.1 MiB fixed base (measured)
+            std::uint64_t reserve_mib = 500U;
+            if (const char* r = std::getenv("NINFER_KV_AUTO_RESERVE_MIB");
+                r != nullptr && r[0] != (char)0) {
+                char* end = nullptr;
+                const long v = std::strtol(r, &end, 10);
+                if (end != r && *end == (char)0 && v >= 0) { reserve_mib = static_cast<std::uint64_t>(v); }
+            }
+            std::size_t free_bytes = 0, total_bytes = 0;
+            (void)cudaMemGetInfo(&free_bytes, &total_bytes);
+            const std::uint64_t host_capacity_bytes = options.context_cache.host_kv_capacity_bytes;
+            struct Tier { KvCacheStorage storage; const char* name; };
+            const Tier tiers[] = {
+                {KvCacheStorage::Fp8KeyNvfp4Value, "k8v4"},
+                {KvCacheStorage::Nvfp4Group16, "nvfp4"},
+                {KvCacheStorage::RotatedLloyd4KeyInt4Value, "rk4v4"},
+                {KvCacheStorage::RotatedE8RootKeyInt4Value, "rk2v4-e8"},
+            };
+            std::uint64_t best_pages = 0, best_host_need = 0, best_host_avail = 0;
+            std::uint64_t best_page_bytes = 0;
+            const char* best_name = nullptr;
+            std::string failures;
+            for (const Tier& tier : tiers) {
+                const PagedKVStorageLayout layout = paged_kv_storage_layout(tier.storage, head_dim);
+                const std::uint64_t page_bytes =
+                    static_cast<std::uint64_t>(layout.physical_bytes_per_token_head()) * 4U * 16U * 64U;
+                const std::uint64_t budget = free_bytes > kAutoBaseBytes + reserve_mib * (1ULL << 20)
+                                                 ? free_bytes - kAutoBaseBytes - reserve_mib * (1ULL << 20)
+                                                 : 0U;
+                const std::uint64_t pool_max = page_bytes == 0 ? 0U : budget / page_bytes;
+                const std::uint64_t pool = std::min(pool_pages_req, pool_max);
+                const std::uint64_t host_need = logical_pages > pool ? logical_pages - pool : 0U;
+                const std::uint64_t host_avail = page_bytes == 0 ? 0U : host_capacity_bytes / page_bytes;
+                const bool feasible = pool >= 8U && pool_max >= 1U && host_need <= host_avail;
+                std::fprintf(stderr,
+                             "[ninfer] auto-tier: tier=%s page_bytes=%llu pool_max=%llu pool=%llu "
+                             "host_needed=%llu host_avail=%llu feasible=%d\\n",
+                             tier.name, static_cast<unsigned long long>(page_bytes),
+                             static_cast<unsigned long long>(pool_max),
+                             static_cast<unsigned long long>(pool),
+                             static_cast<unsigned long long>(host_need),
+                             static_cast<unsigned long long>(host_avail), feasible ? 1 : 0);
+                if (feasible && best_name == nullptr) {
+                    best_name = tier.name; best_pages = pool; best_host_need = host_need;
+                    best_host_avail = host_avail; best_page_bytes = page_bytes;
+                    kv_storage_choice = tier.storage;
+                }
+                if (!feasible) {
+                    failures += std::string(" | ") + tier.name + ": pool_max=" + std::to_string(pool_max) +
+                                " pool=" + std::to_string(pool) + " host_needed=" + std::to_string(host_need) +
+                                " host_avail=" + std::to_string(host_avail);
+                }
+            }
+            if (best_name == nullptr) {
+                throw std::invalid_argument(
+                    std::string("KV dtype auto-tier: no tier is feasible for max_context ") +
+                    std::to_string(options.max_context) + " pool_tokens=" + std::to_string(pool_tokens) +
+                    " free_mib=" + std::to_string(free_bytes / (1024U * 1024U)) +
+                    " reserve_mib=" + std::to_string(reserve_mib) +
+                    " host_kv_mib=" + std::to_string(host_capacity_bytes / (1024U * 1024U)) +
+                    failures);
+            }
+            std::fprintf(stderr,
+                         "[ninfer] auto-tier: chosen=%s reason=%s page_bytes=%llu pool=%llu "
+                         "host_needed=%llu host_avail=%llu reserve_mib=%llu\\n",
+                         best_name, ring_mode ? "ring-feasible" : "full-feasible",
+                         static_cast<unsigned long long>(best_page_bytes),
+                         static_cast<unsigned long long>(best_pages),
+                         static_cast<unsigned long long>(best_host_need),
+                         static_cast<unsigned long long>(best_host_avail),
+                         static_cast<unsigned long long>(reserve_mib));
+        }
+    }
     SequencePlanningInputs inputs{
         .parameters                 = &parameters,
         .capacity                   = options.max_context,
         .max_concurrency            = options.max_concurrency,
         .kv_capacity_automatic      = options.kv_capacity.mode == KvCapacityMode::Automatic,
-        .prefill_chunk              = effective_prefill_chunk(parameters, options),
+        .prefill_chunk              = auto_clamped_prefill_chunk(parameters, options),
         .fast_prefill_kernel        = options.fast_prefill_kernel,
         .draft_window               = options.speculative.draft_tokens,
         .lookup_ngram               = options.speculative.lookup_ngram,
@@ -1585,7 +1707,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .ngram_draft_window         = options.speculative.ngram_draft_tokens,
         .ngram_min_match            = options.speculative.ngram_min_match,
         .speculative_backend        = options.speculative.backend,
-        .kv_storage                 = options.kv_cache,
+        .kv_storage                 = kv_storage_choice,
         .proposal_head              = options.speculative.proposal_head,
         .rope_yarn                  = planned_rope_yarn(parameters, options),
         .mtp_attention_window       = options.speculative.mtp_attention_window,

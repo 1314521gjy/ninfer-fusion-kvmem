@@ -462,6 +462,10 @@ inline void kvmem_score_accumulate(std::int32_t fidx, const void* q, std::int32_
 //
 // 免 oracle 自检：契约保证 `sum_b score[b] == n_query_tokens`（与带掩码与否无关）⇒ sum_score 就是
 // 内置 oracle。对不上说明打分器没跑、跑了半截、或几何配错 —— 三种都得当场喊出来。
+// The dump body lives further down this header; the call site is inside kvmem_score_finish, so the
+// name must be declared first (same-TU inline declaration + later definition is well-formed).
+inline void kvmem_score_dump_if_requested(const char* label) noexcept;
+
 inline void kvmem_score_finish(const char* label, std::int32_t query_tokens,
                                cudaStream_t stream) noexcept {
     if (!kvmem_score_enabled()) { return; }
@@ -544,6 +548,9 @@ inline void kvmem_score_finish(const char* label, std::int32_t query_tokens,
                  (q_used > 0 && sum_score > 0.5 * q_used && sum_score < 2.0 * q_used) ? 1 : 0,
                  static_cast<double>(ops::kvmem_retrieve_scale(p.head_dim)), p.harvest_layers,
                  p.harvest_layers_total);
+
+    // 只做一件已在别处写好、却全树无人调用的仪器：NINFER_TERNARY_KVMEM_SCORE_DUMP 从此真的产文件。
+    kvmem_score_dump_if_requested(label);
 }
 
 // 逐块分数导出（给离线判据用：核对"含针的块"有没有被选中）。只在 switch 打开且本 chunk 打过时写。

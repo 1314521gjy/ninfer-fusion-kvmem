@@ -8,6 +8,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <span>
@@ -124,12 +126,14 @@ public:
                                      const RequestBasePlan& base, std::uint64_t publication_order,
                                      PlanningAllowance /*allowance*/ = {}) {
         if (open_lane_ || program.has_context_transaction()) {
+            diag_block(program, 0, "open_lane_or_ctx_tx");
             return {.readiness = Readiness::TemporarilyBlocked};
         }
         if (publication_order == 0) {
             throw std::invalid_argument("request publication order is zero");
         }
         if (!program.isolated_request_feasible(base)) {
+            diag_block(program, 0, "infeasible");
             return {.readiness = Readiness::PermanentlyInfeasible};
         }
         std::optional<LaneId> destination;
@@ -139,7 +143,10 @@ public:
                 break;
             }
         }
-        if (!destination) { return {.readiness = Readiness::TemporarilyBlocked}; }
+        if (!destination) {
+            diag_block(program, 0, "no_free_lane");
+            return {.readiness = Readiness::TemporarilyBlocked};
+        }
         Quote quote = program.hybrid_quote(prompt, base, *destination);
         if (quote.readiness != Readiness::Ready) { return {.readiness = quote.readiness}; }
         return {.readiness = Readiness::Ready, .choice = Choice(std::move(quote))};
@@ -245,6 +252,7 @@ public:
         FinishResult result = program.finish(sequence);
         if (result.status == ConsumeStatus::Consumed) {
             lanes_[lane.value] = Lane::Free;
+            diag_release(program, lane.value, "finish-published");
             return result;
         }
         AbortResult discarded = program.abort(sequence);
@@ -252,6 +260,7 @@ public:
             throw std::logic_error("Program could neither publish nor discard a sequence");
         }
         lanes_[lane.value] = Lane::Free;
+        diag_release(program, lane.value, "finish-discarded");
         FinishResult released;
         released.status      = ConsumeStatus::Consumed;
         released.disposition = FinishDisposition::Released;
@@ -303,6 +312,7 @@ public:
             throw std::logic_error("pending discard did not consume its membership");
         }
         for (const LaneId lane : lanes) { release_lane(lane); }
+        if (diag_enabled()) { std::fprintf(stderr, "[diag] admit-release site=apply_discard-done\n"); }
     }
 
     void release_failed_commit(std::span<const LaneId> lanes) noexcept {
@@ -370,12 +380,45 @@ private:
         }
     }
 
-    void release_lane(LaneId lane) {
+    void release_lane(LaneId lane, const Program* program = nullptr) {
         if (lane.value >= lane_count_ ||
             (lanes_[lane.value] != Lane::Active && lanes_[lane.value] != Lane::TerminalPending)) {
             throw std::logic_error("released lane has no active owner");
         }
         lanes_[lane.value] = Lane::Free;
+        if (program != nullptr) { diag_release(*program, lane.value, "apply_discard"); }
+    }
+
+    // NINFER_KV_DIAG_ADMIT: read-only diagnostics. OFF (unset / empty / 0) returns before any
+    // formatting, so behaviour and output are byte-for-byte unchanged. This patch only observes; it
+    // never changes a decision (the run owner is expected to compare the OFF arm to the baseline).
+    [[nodiscard]] static bool diag_enabled() noexcept {
+        const char* text = std::getenv("NINFER_KV_DIAG_ADMIT");
+        return text != nullptr && text[0] != '\0' && std::strtol(text, nullptr, 10) > 0;
+    }
+    [[nodiscard]] std::uint32_t lanes_free() const noexcept {
+        std::uint32_t free_lanes = 0;
+        for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
+            if (lanes_[lane] == Lane::Free) { ++free_lanes; }
+        }
+        return free_lanes;
+    }
+    void diag_block(const Program& program, std::uint32_t lane, const char* reason) const noexcept {
+        if (!diag_enabled()) { return; }
+        std::fprintf(stderr,
+                     "[diag] admit-block lane=%u lanes_free=%u open_lane=%d ctx_tx=%d "
+                     "slots_active=%zu reserved=%s reason=%s\n",
+                     lane, lanes_free(), open_lane_.has_value() ? 1 : 0,
+                     program.has_context_transaction() ? 1 : 0,
+                     static_cast<std::size_t>(0), "engine-side", reason);
+    }
+    void diag_release(const Program& program, std::uint32_t lane, const char* site) const noexcept {
+        if (!diag_enabled()) { return; }
+        std::fprintf(stderr,
+                     "[diag] admit-release site=%s lane=%u lanes_free_after=%u open_lane_after=%d "
+                     "ctx_tx_after=%d\n",
+                     site, lane, lanes_free(), open_lane_.has_value() ? 1 : 0,
+                     program.has_context_transaction() ? 1 : 0);
     }
 
     std::uint32_t lane_count_ = 0;

@@ -1,4 +1,4 @@
-#include "serve/http_server.h"
+﻿#include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
@@ -22,7 +22,7 @@ void HttpServer::handle_count_tokens(const httplib::Request& req, httplib::Respo
             parse_anthropic_count_tokens_request(parse_json_body(req));
         const int input_tokens = service_->count_prompt_tokens(
             request.generation, [&req] { return client_disconnected(req); });
-        res.set_content(make_anthropic_count_tokens_response(input_tokens), "application/json");
+        res.set_content(make_anthropic_count_tokens_response(input_tokens), "application/json; charset=utf-8");
     } catch (const ApiException& exception) {
         write_anthropic_error(res, exception.error(), request_id);
     } catch (const std::exception& exception) {
@@ -140,7 +140,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
 
         prepare_sse_response(res);
         res.set_chunked_content_provider(
-            "text/event-stream",
+            "text/event-stream; charset=utf-8",
             [this, stream, encoder, lifecycle](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();

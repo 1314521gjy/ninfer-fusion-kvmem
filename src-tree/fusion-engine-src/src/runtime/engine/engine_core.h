@@ -245,7 +245,14 @@ public:
                 options.execution.sampling.seed ^=
                     (static_cast<std::uint64_t>(entropy()) << 32) ^ entropy();
             }
-            auto output = instance_.frontend.make_output_session(
+            // The frontend lives on the LOADED object, not on the instance -- upstream spells this
+            // `instance_.loaded->frontend` for the same reason (`src/runtime/engine/engine_core.h:210`).
+            // The instance only carries what the plan resolved: capacity, the KV resolution and the
+            // Program. This line was the last shape mismatch between this engine's two generations of
+            // `ModelInstance`; it stayed invisible from 2026-10-07 because this build tree records no
+            // header dependencies (see `docs/20 §10.7`), so `engine.cpp.obj` was never recompiled
+            // after `model_instance.h` changed.
+            auto output = instance_.loaded->frontend.make_output_session(
                 prompt, options.stop, options.output, options.execution.thinking,
                 options.execution.structured_output);
             options.execution.grammar = output.grammar_state();
@@ -2316,7 +2323,19 @@ private:
         }
         for (const auto& request : pending) { force_complete_error(request, error); }
         try { publish_runtime_stats(); } catch (...) {}
-    }
+        // A latch is terminal: `failed_` keeps every later request out, so this Engine can never
+        // serve again, and the process would stay up answering HTTP (including /v1/models) while
+        // nothing can run. A shutdown is not a latch and never exits here.
+        if (cleanup != ProgramCleanup::Shutdown) {
+            if (const char* exit_on_latch = std::getenv("NINFER_EXIT_ON_WORKER_CRASH");
+                exit_on_latch != nullptr && exit_on_latch[0] != '\0' && exit_on_latch[0] != '0') {
+                std::fprintf(stderr,
+                             "[ninfer] engine failed: exiting with code 3 "
+                             "(NINFER_EXIT_ON_WORKER_CRASH is set)\n");
+                std::fflush(stderr);
+                std::_Exit(3);
+            }
+        }    }
 
     void crash_locked(const std::exception_ptr& error) noexcept {
         try {
@@ -2333,18 +2352,8 @@ private:
         try {
             publish_runtime_stats();
         } catch (...) {}
-        // `failed_` keeps every later request out, so this Engine cannot serve again: the process
-        // would stay up answering HTTP (including /v1/models) while nothing can run. Exiting is what
-        // a supervisor needs; opt in with NINFER_EXIT_ON_WORKER_CRASH=1 so a deployment can choose
-        // restart-on-crash instead of a zombie. The HTTP layer already answers 503 while unavailable.
-        if (const char* exit_on_crash = std::getenv("NINFER_EXIT_ON_WORKER_CRASH");
-            exit_on_crash != nullptr && exit_on_crash[0] != '\0' && exit_on_crash[0] != '0') {
-            std::fprintf(stderr,
-                         "[ninfer] worker crash: exiting with code 3 "
-                         "(NINFER_EXIT_ON_WORKER_CRASH is set)\n");
-            std::fflush(stderr);
-            std::_Exit(3);
-        }
+        // The NINFER_EXIT_ON_WORKER_CRASH exit lives in `fail_all_locked` now -- one site for every
+        // latch path, including this one.
     }
 
     void worker_loop() noexcept {

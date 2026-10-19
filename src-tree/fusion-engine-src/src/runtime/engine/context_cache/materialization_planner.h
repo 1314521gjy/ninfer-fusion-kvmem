@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -137,6 +139,7 @@ public:
          std::uint32_t root_candidate_index, PressureInputsFn&& pressure_inputs,
          LogicalGoalFn&& logical_goal, FinalScheduleFn&& final_schedule,
          Clock::time_point planning_started, PlanningAllowance allowance = {}) {
+        if (diag_planner_enabled()) { std::fprintf(stderr, "[diag] mp-planner-enter-body cand=%zu\n", candidates.size()); }
         if (candidates.empty() || root_candidate_index >= candidates.size()) {
             throw std::invalid_argument("materialization planning problem has no root candidate");
         }
@@ -384,7 +387,7 @@ public:
             // admission needs released is the most recent one, it is the only adoptable count, and
             // sparing then keeps every older owner the admission does not need. Only when even it
             // cannot be adopted does the caller fall back to the clear-all backstop.
-            if (lo == ranked && (ranked == 0 || !adoptable_any(ranked))) { return std::nullopt; }
+            if (lo == ranked && (ranked == 0 || !adoptable_any(ranked))) { diag_planner_null("L387", "ladder-not-adoptable", static_cast<int>(ranked)); return std::nullopt; }
             LadderRung rung;
             rung.sacrifice   = lo;
             rung.demote_kept = demote_adoptable[lo] >= 0
@@ -446,7 +449,7 @@ public:
                 goal = logical_goal(assessment.candidate, assessment.source_mode,
                                     assessment.owner_outcomes);
             }
-            if (!goal) { return std::nullopt; }
+            if (!goal) { diag_planner_null("L449", "no-logical-goal", static_cast<int>(assessment.physical_status)); return std::nullopt; }
             const FoldedCost cost =
                 fold_assessment(candidates[root_candidate_index], assessment, pressure.owner_policy,
                                 pressure.checkpoint_policy, machine_cost);
@@ -599,7 +602,7 @@ public:
                 incumbent = make_incumbent(target, expected_candidate, assessment,
                                            std::move(assessed), cost, *goal);
             }
-            if (!assessment.expandable) { return std::nullopt; }
+            if (!assessment.expandable) { diag_planner_null("L602", "not-expandable", 0); return std::nullopt; }
             mark_target(assessment.stable_target_ordinal, kTargetExpandable);
             QueueEntry entry = make_queue_entry(target, expected_candidate, assessment, cost);
             queue_push(entry);
@@ -1044,6 +1047,7 @@ public:
          std::uint32_t root_candidate_index, PressureInputsFn&& pressure_inputs,
          LogicalGoalFn&& logical_goal, Clock::time_point planning_started,
          PlanningAllowance allowance = {}) {
+        if (diag_planner_enabled()) { std::fprintf(stderr, "[diag] mp-planner-enter-fwd cand=%zu\n", candidates.size()); }
         const auto no_optional_schedule = [](PlanningCandidateId, const RequestPlanSummary&,
                                              const auto&) { return std::vector<std::uint32_t>{}; };
         return plan(program, prompt, machine_cost, candidates, root_candidate_index,
@@ -1052,6 +1056,22 @@ public:
                     planning_started, allowance);
     }
 
+    // NINFER_KV_DIAG_PLAN: read-only probes for the planner's own nullopt exits. OFF (unset/empty/0)
+    // returns before formatting, so behaviour and output are byte-for-byte unchanged.
+    [[nodiscard]] static bool diag_planner_enabled() noexcept {
+        const char* text = std::getenv("NINFER_KV_DIAG_PLAN");
+        return text != nullptr && text[0] != '\0' && std::strtol(text, nullptr, 10) > 0;
+    }
+    static void diag_planner_null(const char* site, const char* note, int extra) noexcept {
+        if (!diag_planner_enabled()) { return; }
+        std::fprintf(stderr,
+                     "[diag] planner-null site=%s cand=n/a goal=n/a pressure=n/a need_pages=n/a "
+                     "avail_pages=n/a note=%s extra=%d\n", site, note, extra);
+    }
+    static void diag_planner_ok(const char* site) noexcept {
+        if (!diag_planner_enabled()) { return; }
+        std::fprintf(stderr, "[diag] planner-ok site=%s cand=n/a pages=n/a\n", site);
+    }
 private:
     static constexpr std::uint32_t kTargetBudget = 4096;
 

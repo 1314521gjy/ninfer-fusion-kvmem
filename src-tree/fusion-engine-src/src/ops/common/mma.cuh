@@ -95,6 +95,28 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, 
                                                unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                                unsigned b0, unsigned b1, unsigned sfa,
                                                unsigned sfb) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 1000
+    // NVFP4 block-scaled MMA (kind::mxf4nvf4) is Blackwell-only and Ada has no equivalent, so below
+    // sm_100 this must not emit the instruction at all -- ptxas rejects it outright ("Instruction
+    // 'mma with block scale' not supported on .target 'sm_89'"). Copied from the upstream primitive
+    // (upstream ops/common/mma.cuh:94-103). The state is unreachable by construction: the
+    // Flash-Next MoE dispatch takes the SIMT W4A16 arm for every token count on these architectures
+    // and rejects prefill sizes >= 512 host-side. Trap loudly rather than accumulate silently wrong
+    // numbers if that contract is ever broken.
+    (void)a0;
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)b0;
+    (void)b1;
+    (void)sfa;
+    (void)sfb;
+    (void)c0;
+    (void)c1;
+    (void)c2;
+    (void)c3;
+    __trap();
+#else
     constexpr unsigned short kScaleBlockId  = 0;
     constexpr unsigned short kScaleThreadId = 0;
     asm volatile("mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X."
@@ -111,6 +133,7 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, 
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(sfa),
                    "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(sfb), "h"(kScaleBlockId),
                    "h"(kScaleThreadId));
+#endif
 }
 
 } // namespace ninfer::ops

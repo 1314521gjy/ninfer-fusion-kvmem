@@ -1,4 +1,4 @@
-#include "serve/http_server.h"
+﻿#include "serve/http_server.h"
 
 #include "product/logging/logging.h"
 #include "serve/anthropic_messages.h"
@@ -167,7 +167,7 @@ std::string response_request_id(const httplib::Response& response) {
 
 void write_openai_error(httplib::Response& response, const ApiError& error) {
     response.status = error.status;
-    response.set_content(make_error_body(error), "application/json");
+    response.set_content(make_error_body(error), "application/json; charset=utf-8");
 }
 
 void write_anthropic_error(httplib::Response& response, const ApiError& api_error,
@@ -176,7 +176,7 @@ void write_anthropic_error(httplib::Response& response, const ApiError& api_erro
     response.status      = error.status;
     response.headers.erase("request-id");
     response.set_header("request-id", request_id);
-    response.set_content(make_anthropic_error_body(error, request_id), "application/json");
+    response.set_content(make_anthropic_error_body(error, request_id), "application/json; charset=utf-8");
 }
 
 httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions& options,
@@ -560,7 +560,7 @@ void HttpServer::register_routes() {
     });
     for (const char* base : {"/v1", "/v1/"}) {
         server_.Get(base, [this](const httplib::Request&, httplib::Response& res) {
-            res.set_content(make_api_index(public_model_id_).dump(), "application/json");
+            res.set_content(make_api_index(public_model_id_).dump(), "application/json; charset=utf-8");
         });
     }
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
@@ -667,12 +667,12 @@ LoadSample HttpServer::load_sample() const {
 
 void HttpServer::handle_load(const httplib::Request&, httplib::Response& res) const {
     res.set_header("Cache-Control", "no-store");
-    res.set_content(make_load_report(load_capacity_, load_sample()), "application/json");
+    res.set_content(make_load_report(load_capacity_, load_sample()), "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_stats(const httplib::Request&, httplib::Response& res) const {
     res.set_header("Cache-Control", "no-store");
-    res.set_content(make_stats_report(load_capacity_, load_sample()), "application/json");
+    res.set_content(make_stats_report(load_capacity_, load_sample()), "application/json; charset=utf-8");
 }
 
 // The pollers' own listener: one worker and no generation routes, so a dashboard or watchdog is
@@ -702,7 +702,7 @@ void HttpServer::handle_health(httplib::Response& res) const {
     const bool available = service_ != nullptr && service_->is_available();
     res.status           = available ? 200 : 503;
     res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
-                    "application/json");
+                    "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_metrics(const httplib::Request&, httplib::Response& res) const {
@@ -724,7 +724,7 @@ void HttpServer::handle_slots(const httplib::Request&, httplib::Response& res) c
                          {"is_processing", lane < running}});
     }
     res.set_header("Cache-Control", "no-store");
-    res.set_content(slots.dump(), "application/json");
+    res.set_content(slots.dump(), "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) const {
@@ -759,14 +759,14 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
         // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
         {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
-    res.set_content(props.dump(), "application/json");
+    res.set_content(props.dump(), "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
     res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context,
                                      options_.enable_vision,
                                      model_metadata_),
-                    "application/json");
+                    "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_model(const httplib::Request& req, httplib::Response& res) const {
@@ -783,7 +783,7 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
     res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context,
                                       options_.enable_vision,
                                       model_metadata_),
-                    "application/json");
+                    "application/json; charset=utf-8");
 }
 
 bool HttpServer::bind() {

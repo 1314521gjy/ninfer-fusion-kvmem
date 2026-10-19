@@ -61,6 +61,8 @@ ParameterReference Binder::binding(std::string name, const Binding& binding, Sha
             require_pinned(part.object);
         } else if (residency == Residency::Host) {
             (void)host_object(part.object);
+        } else if (residency == Residency::Mapped) {
+            require_mapped(part.object);
         }
     }
     return {std::move(name), std::move(shape), binding, residency};
@@ -137,6 +139,16 @@ void Binder::require_pinned(ObjectHandle object) {
     auto& demand         = demands_.at(object.index);
     demand.alignment     = std::max(demand.alignment, geometry.alignment);
     if (!demand.pinned_order) { demand.pinned_order = next_pinned_order_++; }
+}
+
+void Binder::require_mapped(ObjectHandle object) {
+    // Validate the object now: a mapped object is never read at load time, so this is the only place
+    // its geometry can be checked before a reader trusts a span computed from its offset.
+    reader_.validate_object(object);
+    const auto& geometry = reader_.geometry(object);
+    auto& demand         = demands_.at(object.index);
+    demand.alignment     = std::max(demand.alignment, geometry.alignment);
+    demand.mapped        = true;
 }
 
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
@@ -246,9 +258,13 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
     std::vector<std::vector<std::size_t>> resident(rank_count);
     for (std::size_t i = 0; i < demands_.size(); ++i) {
         const auto& demand = demands_[i];
-        if (demand.pinned_order && (demand.device || demand.host)) {
+        if (demand.pinned_order && (demand.device || demand.host || demand.mapped)) {
             throw ArtifactError(reader_.directory().tensor(ObjectHandle{i}).id +
-                                ": a pinned object cannot also have device or Host placement");
+                                ": a pinned object cannot also have device, Host or mapped placement");
+        }
+        if (demand.mapped && (demand.device || demand.host)) {
+            throw ArtifactError(reader_.directory().tensor(ObjectHandle{i}).id +
+                                ": a mapped object cannot also have device or Host placement");
         }
         if (demand.pinned_order) { pinned.push_back(i); }
         if (!demand.device) { continue; }
@@ -295,6 +311,18 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
         if (demands_[i].host) {
             plan.host_objects.push_back({ObjectHandle{i}, std::move(demands_[i].host_data)});
         }
+    }
+    // Mapped placements record what a reader needs to prove where the bytes came from: the object's
+    // own id and the byte offset where it starts in the entry file (payload start + object offset).
+    // The offset is what lets a reader compare VirtualQuery's AllocationBase against the real mapping
+    // instead of trusting a span that may point at a private buffer.
+    for (std::size_t i = 0; i < demands_.size(); ++i) {
+        if (!demands_[i].mapped) { continue; }
+        const ObjectHandle handle{i};
+        const auto& object = reader_.directory().object(handle);
+        plan.mapped_objects.push_back(
+            {handle, object_id(object),
+             checked_add(reader_.payload_offset(), object_offset(object), "mapped file offset")});
     }
     return plan;
 }

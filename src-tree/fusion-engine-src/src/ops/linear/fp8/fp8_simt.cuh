@@ -54,10 +54,11 @@ template <class Geometry, int ActiveTokens, class Schedule, class Output,
           class Epilogue = Fp8IdentityEpilogue, class RowPolicy = Fp8GemvIdentityRows,
           bool PairRows                    = false,
           Fp8SimtFinalization Finalization = Fp8SimtFinalization::Elementwise,
-          bool RuntimeColumns              = false>
+          bool RuntimeColumns              = false,
+          class Scale                      = Fp8DefaultScale>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_simt_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
-    const __nv_bfloat16* __restrict__ row_scales, Output output, Epilogue epilogue = {},
+    const Scale* __restrict__ row_scales, Output output, Epilogue epilogue = {},
     RowPolicy row_policy = {}, int columns = ActiveTokens) {
     const int live_tokens = RuntimeColumns ? columns : ActiveTokens;
     static_assert(!RuntimeColumns || Finalization == Fp8SimtFinalization::Elementwise);
@@ -190,7 +191,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
 #pragma unroll
         for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
             const int parent_row = row_policy.weight_row(row_begin, local_row);
-            const float scale    = __bfloat162float(row_scales[parent_row]);
+            const float scale    = fp8_row_scale(row_scales[parent_row]);
             float projected[ActiveTokens];
 #pragma unroll
             for (int local_token = 0; local_token < live_tokens; ++local_token) {
@@ -229,11 +230,11 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
                         row_policy.weight_row(row_begin, kStoredRowsPerWarp + local_row);
                     const float first =
                         epilogue.apply(first_row, token,
-                                       totals[local_row] * __bfloat162float(row_scales[first_row]));
+                                       totals[local_row] * fp8_row_scale(row_scales[first_row]));
                     const float second =
                         epilogue.apply(second_row, token,
                                        totals[kStoredRowsPerWarp + local_row] *
-                                           __bfloat162float(row_scales[second_row]));
+                                           fp8_row_scale(row_scales[second_row]));
                     output.store_pair(row_begin + local_row, token, first, second);
                 }
             }
@@ -242,7 +243,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
 #pragma unroll
         for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
             const int parent_row = row_policy.weight_row(row_begin, local_row);
-            const float scale    = __bfloat162float(row_scales[parent_row]);
+            const float scale    = fp8_row_scale(row_scales[parent_row]);
 #pragma unroll
             for (int local_token = 0; local_token < Schedule::kTokenTile; ++local_token) {
                 const int token = token0 + local_token;

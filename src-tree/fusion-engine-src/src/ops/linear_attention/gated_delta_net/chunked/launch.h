@@ -18,6 +18,14 @@
 
 namespace ninfer::ops::detail::gated_delta_net::chunked {
 
+// Per-stage instrumentation hook. Copied from the upstream ops layer
+// (upstream include/ninfer/ops/gated_delta_net.h:55-60): the qwen3_8_flash_next target drives
+// its stage ledger through this, so the chunked path must report the three stage boundaries.
+struct GdnChunkedStageHook {
+    void (*record_stage)(void* user_data, int stage_id, cudaStream_t stream) = nullptr;
+    void* user_data = nullptr;
+};
+
 inline constexpr std::size_t kWorkspaceAlign = 256;
 
 struct workspace_layout {

@@ -981,6 +981,17 @@ void parse_thinking_budget(const Json& body, GenerationRequest& output) {
     output.thinking_budget = static_cast<std::uint32_t>(parsed);
 }
 
+// S2b: request-level thinking-channel presence penalty. Absent or null => untouched (no interaction
+// at all). An explicit 0 is a real value here, unlike thinking_budget's 0 == "not set".
+void parse_thinking_presence_penalty(const Json& body, GenerationRequest& output) {
+    const std::optional<double> value = get_number(body, "thinking_presence_penalty");
+    if (!value) { return; }
+    if (!(*value >= -2.0) || !(*value <= 2.0)) {
+        bad_request("thinking_presence_penalty must be within [-2, 2]", "thinking_presence_penalty");
+    }
+    output.thinking_presence_penalty = static_cast<float>(*value);
+}
+
 void parse_stream_options(const Json& body, OpenAIChatRequest& output) {
     output.stream = get_bool(body, "stream", false);
     if (!body.contains("stream_options") || body.at("stream_options").is_null()) { return; }
@@ -1054,6 +1065,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);
     parse_thinking_budget(body, output.generation);
+    parse_thinking_presence_penalty(body, output.generation);
     const TemplateOptions template_options      = parse_template_options(body);
     output.generation.enable_thinking           = template_options.enable_thinking;
     output.generation.preserve_thinking         = template_options.preserve_thinking;

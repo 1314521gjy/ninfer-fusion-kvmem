@@ -26,6 +26,13 @@ struct Nvfp4ActivationGeometry {
     static constexpr std::int32_t kCodeBytesPerRow = InputRows / 2;
 };
 
+// Upstream spells the GEMV geometry `Nvfp4GemvGeometry` (upstream ops/linear/nvfp4/nvfp4_config.h:30)
+// and the ported qwen3_8_flash_next MoE kernels name it that way. Identical template parameters,
+// assertions and members, so it is an alias: one geometry, two accepted names. `Nvfp4Geometry`
+// remains the spelling this tree's own call sites use.
+template <std::int32_t OutputRows, std::int32_t InputRows>
+using Nvfp4GemvGeometry = Nvfp4Geometry<OutputRows, InputRows>;
+
 using Nvfp4N14336K5120 = Nvfp4Geometry<14336, 5120>;
 using Nvfp4N16384K5120 = Nvfp4Geometry<16384, 5120>;
 using Nvfp4N34816K5120 = Nvfp4Geometry<34816, 5120>;

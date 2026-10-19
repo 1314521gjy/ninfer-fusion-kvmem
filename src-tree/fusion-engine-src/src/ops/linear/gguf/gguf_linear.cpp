@@ -101,6 +101,9 @@ gguf::GgmlType gguf_type(QType format) {
     case QType::GGUF_IQ1_M: return gguf::GgmlType::IQ1_M;
     case QType::GGUF_IQ4_NL: return gguf::GgmlType::IQ4_NL;
     case QType::GGUF_IQ4_XS: return gguf::GgmlType::IQ4_XS;
+    // Block-5: the vector-only type (see GgmlType::Q2_0). Down experts at K = 640 go through the
+    // bridge's vector product directly -- `require_gguf`'s K % 512 gate does not admit them here.
+    case QType::GGUF_Q2_0: return gguf::GgmlType::Q2_0;
     default: break;
     }
     throw std::invalid_argument("gguf: not a GGUF block format");

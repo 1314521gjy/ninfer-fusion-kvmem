@@ -42,16 +42,63 @@ enum class QType : std::uint16_t {
     // GGUF_Q8_0..GGUF_IQ4_XS, so a new value must land outside that range, and the wire format
     // carries the name rather than the number, so nothing may be renumbered.
     PTQ1_G128_FP16 = 25,
+    // 64-bit integers carried as a stored plane rather than as matrix weights. The
+    // Qwen3.8-Flash-Next container stores its PLE token-table offsets and per-head vocabulary sizes
+    // this way, and a listed format name is how the reader gets at those bytes.
+    I64 = 26,
+    // PLE (per-layer embedding) table packing: 32 bytes hold 16 four-bit codes and one binary16
+    // multiplier (hence the name: U4 codes, zero padding to a byte, group of 16, fp16 scale). Codes
+    // are packed low-nibble-first, row-major, rank-two only.
+    //
+    // The Qwen3.8-Flash-Next PLE table is 320,001,536 rows by 160 columns and this is the only format
+    // it is ever stored in, so nothing in the engine could reach such a table without this value.
+    //
+    // Appended LAST, after I64, so nothing already numbered moves: the wire format carries the format
+    // name rather than the number, but a stored QType is still a stable value in anything that logged
+    // one.
+    U4Z8G16_F16S = 27,
+    // The FP32-scale variant of row-scaled FP8. Upstream carries both this and the BF16-scale
+    // spelling (`FP8_E4M3FN_ROW_BF16S` there, `FP8_E4M3FN_ROW_BF16` here) and picks the scale word
+    // width from the format alone:
+    //
+    //     FP8_E4M3FN_ROW_BF16  ->  2-byte scale word
+    //     FP8_E4M3FN_ROW_F32   ->  4-byte scale word
+    //
+    // The published Qwen3.8-Flash-Next container stores 96 objects -- every
+    // `text/layers/<i>/gdn/query_key_value_z` -- in this format under the layout name
+    // `row-scale-f32-v1`, so the engine cannot load that model without it. Appended after
+    // U4Z8G16_F16S so nothing already numbered moves.
+    FP8_E4M3FN_ROW_F32 = 28,
+
+    // Upstream spells the row-scaled FP8 pair with an `S` suffix (`tensor.h:39-40` there:
+    // `FP8_E4M3FN_ROW_BF16S = 8`, `FP8_E4M3FN_ROW_F32S = 9`). The ported qwen3_8_flash_next layer
+    // is written against those spellings, so they are carried here as aliases of the same values --
+    // one format, one number, two accepted names. No value is added: an alias cannot drift.
+    FP8_E4M3FN_ROW_BF16S = FP8_E4M3FN_ROW_BF16,
+    FP8_E4M3FN_ROW_F32S  = FP8_E4M3FN_ROW_F32,
+    // Block-5 IQ3_S artifact: ggml's Q2_0 (ggml type id 42), the 2-bit format the community
+    // artifact stores on nine `ffn_down_exps` matrices. {QK2_0 = 64 elements, 18 bytes} = 2.25 bits
+    // per weight, kept byte for byte. Appended last on purpose: `is_gguf()` below names it
+    // explicitly instead of moving the value into the GGUF_Q8_0..IQ4_XS range, so nothing already
+    // numbered moves and the range test's invariants stay pinned by the static asserts.
+    GGUF_Q2_0 = 29,
 };
 
 [[nodiscard]] constexpr bool is_gguf(QType format) {
-    return format >= QType::GGUF_Q8_0 && format <= QType::GGUF_IQ4_XS;
+    return (format >= QType::GGUF_Q8_0 && format <= QType::GGUF_IQ4_XS) ||
+           format == QType::GGUF_Q2_0;
 }
 
 // The range test above only stays correct while the ggml block types remain the contiguous top of
 // the enum. Pin it, so a later insertion cannot silently make a ternary weight "a gguf block".
+// Q2_0 sits OUTSIDE the range and is named by the `||` itself, so the range keeps its meaning.
 static_assert(!is_gguf(QType::T2_G128_FP16));
 static_assert(!is_gguf(QType::PTQ1_G128_FP16));
+// Same guard for the two appended values: they sit above the ggml range, so `is_gguf` must say no.
+// If a future insertion moves them inside GGUF_Q8_0..GGUF_IQ4_XS, these fire instead of the GGUF
+// kernels silently accepting a PLE plane as a ggml block.
+static_assert(!is_gguf(QType::I64));
+static_assert(!is_gguf(QType::U4Z8G16_F16S));
 
 // The ternary family: the SAME {-1, 0, +1} trits in two packings. They are told apart by the high
 // plane -- PTQ1_0 carries 2 bytes per 128-group, T2 carries none -- which is also what the kernels
@@ -120,6 +167,9 @@ struct GgufBlockShape {
     case QType::GGUF_IQ1_M: return {256, 56};
     case QType::GGUF_IQ4_NL: return {32, 18};
     case QType::GGUF_IQ4_XS: return {256, 136};
+    // Block-5 IQ3_S artifact: ggml Q2_0, QK2_0 = 64 elements, 2-byte binary16 scale plus
+    // 64 / 4 = 16 bytes of 2-bit codes.
+    case QType::GGUF_Q2_0: return {64, 18};
     default: return {};
     }
 }
@@ -136,6 +186,15 @@ enum class QuantLayout : std::uint16_t {
     RowSplitPanel = 4,
     // Rows of whole ggml blocks, as a GGUF stores them.
     GgufBlocks = 5,
+    // Packed four-bit codes with an fp16 multiplier per sixteen columns. One stored layout, one
+    // format: `U4Z8G16_F16S`, which is the Qwen3.8-Flash-Next PLE table and nothing else.
+    //
+    //   [ code plane: rows * columns / 2 ][ pad to 256 ][ scale plane: rows * (columns/16) * 2 ]
+    //
+    // Both planes span the whole rank-two tensor -- there is no per-row padding, and the scale plane
+    // ends exactly at the payload end. The ported PLE decoder derives exactly these three facts from
+    // the payload it is handed (`make_ple_shard_view`), so they are the contract, not a guess.
+    PackedU4G16 = 6,
 };
 
 // Rows per stored panel. Four 32-byte records is exactly one 128-byte line, which is all the

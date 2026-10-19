@@ -429,8 +429,9 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
         // (patches-master/_superseded/A-paged_kv_cache.cpp.FULL-do-not-apply.patch:145-149).
         std::fprintf(stderr,
                      "[diag] materialize-batch FAIL count=%u usable=%u allocated=%u reserved=%u "
-                     "reservation=%u\n",
-                     count, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_);
+                     "reservation=%u capacity=%u lent=%u\n",
+                     count, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_,
+                     capacity_pages(), lent_pages_);
         // LOCAL FIX (B01 classification): this test is a CAPACITY condition -- the pool has no free
         // page for the pages this materialization must place (restore, logical growth, transfer
         // destination) -- but it used to be thrown as a std::logic_error, i.e. an "internal
@@ -523,17 +524,38 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
 }
 
 DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& reservation,
-                                                    const char* tag) {
+                                                    const char* tag,
+                                                    const std::function<bool(const char*)>& evict) {
     if (!reservation.belongs_to(*this) || reservation.pages_ == 0) {
         throw std::invalid_argument("Paged KV single-page materialization exceeds reservation");
     }
+    // G2: ask the owner to demote a resident page to its host copy before declaring exhaustion.
+    // Small and bounded on purpose: 4 attempts matches kRestoreSlackPages (context.cpp:2447), i.e.
+    // one attempt per page the restore path is allowed to keep in reserve, so a single restore can
+    // never spin here. A sink that frees nothing ends the loop immediately.
+    constexpr int kMaxEvictAttempts = 4;
+    if (free_page_runs_.empty() && evict) {
+        for (int attempt = 0; attempt < kMaxEvictAttempts && free_page_runs_.empty(); ++attempt) {
+            if (!evict(tag)) { break; }
+            ++counters.evicted;
+        }
+        if (!free_page_runs_.empty()) {
+            std::fprintf(stderr,
+                         "[diag] kv-ring visible=%u resident=%u clamp=1 evicted=%llu tag=%s\n",
+                         usable_pages(), allocated_pages_,
+                         static_cast<unsigned long long>(counters.evicted),
+                         tag != nullptr ? tag : "unnamed");
+        }
+    }
     if (free_page_runs_.empty()) {
+        ++counters.exhausted;
         // Which caller hit the wall matters as much as the counters: host restore, logical
         // growth and transfer destinations reach this pool by different paths.
         std::fprintf(stderr,
                      "[diag] materialize-one FAIL tag=%s usable=%u allocated=%u reserved=%u "
-                     "reservation=%u\n",
-                     tag, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_);
+                     "reservation=%u capacity=%u lent=%u\n",
+                     tag, usable_pages(), allocated_pages_, reserved_pages_, reservation.pages_,
+                     capacity_pages(), lent_pages_);
         // LOCAL FIX (B01 classification): same as materialize_batch above -- "no free page run left"
         // is capacity exhaustion, not an internal invariant. ContextCacheExhausted (a std::bad_alloc)
         // routes it to the worker's out-of-memory path and to the transaction layer's capacity
@@ -544,10 +566,11 @@ DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& res
             (tag != nullptr ? tag : "an unnamed materialization") + ": usable " +
             std::to_string(usable_pages()) + " (capacity " + std::to_string(capacity_pages()) +
             ", lent " + std::to_string(lent_pages_) + "), allocated " +
-            std::to_string(allocated_pages_) + ", reserved " + std::to_string(reserved_pages_) +
-            " of which this reservation " + std::to_string(reservation.pages_) +
+            std::to_string(allocated_pages_) + " of which this reservation " +
+            std::to_string(reservation.pages_) +
             " -- previously reported as \"Paged KV reservation invariant was violated\"");
     }
+    ++counters.materialized;
     KVPageRun& run        = free_page_runs_.front();
     const std::int32_t page = run.begin++;
     if (--run.count == 0) { free_page_runs_.erase(free_page_runs_.begin()); }

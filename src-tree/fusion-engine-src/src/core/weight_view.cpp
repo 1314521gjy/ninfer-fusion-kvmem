@@ -39,8 +39,14 @@ std::uint64_t word_bytes(QType format) {
     case QType::FP32:
     case QType::INT32:
         return 4;
+    // Copied from upstream `direct_word_bytes`, which lists the same four types and returns 8 here.
+    // The Qwen3.8-Flash-Next PLE side data (`text/layers/1/ple/embedding/ngram_head_offsets` and its
+    // two neighbours) is stored I64 under `contiguous-le-v1`, so without this branch the engine
+    // cannot size those three objects.
+    case QType::I64:
+        return 8;
     default:
-        throw std::invalid_argument("direct weight requires BF16, FP32 or INT32");
+        throw std::invalid_argument("direct weight requires BF16, FP32, INT32 or I64");
     }
 }
 
@@ -52,6 +58,8 @@ DType direct_dtype(QType format) {
         return DType::FP32;
     case QType::INT32:
         return DType::I32;
+    case QType::I64:
+        return DType::I64;
     default:
         throw std::invalid_argument("quantized weight cannot be bound as a direct tensor");
     }
@@ -95,9 +103,15 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         }
         return out;
     }
-    if (shape.size() != 2) { throw std::invalid_argument("quantized weight must be a matrix"); }
-    const auto n       = shape[0];
-    const auto k       = shape[1];
+    // Block-5: a rank-three shape over GgufBlocks is an expert bank -- (experts, rows, k), stored as
+    // one contiguous run of whole-block rows with no planes and no padding -- so its encoded size is
+    // the rank-two formula with n = experts * rows. Every other quantized layout stays rank-two.
+    const bool gguf_bank = layout == QuantLayout::GgufBlocks && shape.size() == 3;
+    if (shape.size() != 2 && !gguf_bank) {
+        throw std::invalid_argument("quantized weight must be a matrix");
+    }
+    const auto n = gguf_bank ? mul(shape[0], shape[1]) : shape[0];
+    const auto k = gguf_bank ? shape[2] : shape[1];
     out.padded_columns = k;
     if (is_row_split(layout)) {
         // The plane geometry comes from core/weight.h's row_split_format(), which is its single
@@ -128,12 +142,21 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         out.code_bytes         = mul(n, out.code_bytes_per_row);
         out.scale_offset       = out.code_bytes;
     } else if (layout == QuantLayout::RowScale) {
-        if (format != QType::FP8_E4M3FN_ROW_BF16) {
-            throw std::invalid_argument("RowScale requires row-scaled FP8");
+        // Copied from upstream `row_scale_geometry` (artifact/storage_layouts.cpp): the scale word
+        // width comes from the format, and there is exactly one scale word per row. Keeping that
+        // shape rather than dropping the format check is what makes the 4-byte variant work without
+        // a second code path.
+        std::uint64_t scale_word_bytes = 0;
+        if (format == QType::FP8_E4M3FN_ROW_BF16) {
+            scale_word_bytes = 2;
+        } else if (format == QType::FP8_E4M3FN_ROW_F32) {
+            scale_word_bytes = 4;
+        } else {
+            throw std::invalid_argument("RowScale requires a row-scaled FP8 format");
         }
         out.group_size          = k;
         out.code_bytes_per_row  = k;
-        out.scale_bytes_per_row = 2;
+        out.scale_bytes_per_row = scale_word_bytes;
         out.code_bytes          = out.elements;
         out.scale_offset        = aligned(out.code_bytes, 256);
     } else if (layout == QuantLayout::BlockScaleK16M128x4) {
@@ -143,6 +166,17 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         out.group_size          = 16;
         out.code_bytes_per_row  = k / 2;
         out.scale_bytes_per_row = k / 16;
+        out.code_bytes          = out.elements / 2;
+        out.scale_offset        = aligned(out.code_bytes, 256);
+    } else if (layout == QuantLayout::PackedU4G16) {
+        // One layout, one format: the PLE shard. The three facts below are also what the ported
+        // decoder re-derives from the payload, so a shard that satisfies one satisfies the other.
+        if (format != QType::U4Z8G16_F16S || k % 16) {
+            throw std::invalid_argument("PackedU4G16 requires U4Z8G16_F16S and K%16=0");
+        }
+        out.group_size          = 16;
+        out.code_bytes_per_row  = k / 2;
+        out.scale_bytes_per_row = (k / 16) * 2;
         out.code_bytes          = out.elements / 2;
         out.scale_offset        = aligned(out.code_bytes, 256);
     } else {

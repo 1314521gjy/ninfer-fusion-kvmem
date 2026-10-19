@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "runtime/contract/structured_output.h"
 #include <atomic>
 #include <cstdint>
 #include <optional>
@@ -18,6 +19,12 @@ namespace ninfer::runtime {
 struct ResolvedExecutionOptions {
     StructuredOutputOptions structured_output;
     std::shared_ptr<text::GrammarState> grammar;
+    // The compiled structured-output constraint this request samples under, or null. Upstream
+    // declares the same field on its resolved options (`runtime/contract/types.h`) and the ported
+    // qwen3_8_flash_next program reads it directly to build its per-lane OutputConstraintState.
+    // This engine already owns the type (`runtime/contract/structured_output.h`); the field simply
+    // exposes the compiled constraint the frontend produced instead of only the raw options.
+    std::shared_ptr<const CompiledOutputConstraint> output_constraint;
     ResolvedSamplingParameters sampling;
     // Applied once the model closes its reasoning block.
     std::optional<ResolvedSamplingParameters> post_thinking_sampling;

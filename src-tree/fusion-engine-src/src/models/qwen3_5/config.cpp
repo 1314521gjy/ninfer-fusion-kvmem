@@ -155,7 +155,12 @@ TextConfig text(const Json& value, bool mtp) {
         (void)gdn.conv_channels();
         out.gdn = gdn;
     }
-    if (out.architecture == Architecture::Qwen3_5Moe) {
+    // Qwen4Exp is a Mixture-of-Experts architecture too: its 512-expert top-10 FFN is described by
+    // the same four members Qwen3_5Moe uses, and it carries no `intermediate_size`. Leaving it out
+    // sent a Qwen4Exp text config down the Dense branch, which then rejected the MoE members it had
+    // just been given ("Dense config carries MoE fields").
+    if (out.architecture == Architecture::Qwen3_5Moe ||
+        out.architecture == Architecture::Qwen4Exp) {
         if (value.contains("intermediate_size")) {
             throw ArtifactError("MoE config carries Dense FFN width");
         }
@@ -324,9 +329,14 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         if (out.mtp) {
             const auto& config = companion(directory, "mtp").config;
             require_members(config, {"architectures"}, {}, "MTP config");
-            if (architecture(config) != (out.text.architecture == Architecture::Qwen3_5Moe
-                                             ? "Qwen3_5MoeMTP"
-                                             : "Qwen3_5MTP")) {
+            // Three architectures reach here, so the expected name is a three-way choice rather than
+            // a MoE/dense pair: Qwen4Exp's draft head is named `Qwen4ExpMTP` and falling through to
+            // `Qwen3_5MTP` rejected it as "MTP architecture differs from target mathematics".
+            const std::string_view expected_mtp =
+                out.text.architecture == Architecture::Qwen4Exp ? "Qwen4ExpMTP"
+                : out.text.architecture == Architecture::Qwen3_5Moe ? "Qwen3_5MoeMTP"
+                                                                     : "Qwen3_5MTP";
+            if (architecture(config) != expected_mtp) {
                 throw ArtifactError("MTP architecture differs from target mathematics");
             }
         }

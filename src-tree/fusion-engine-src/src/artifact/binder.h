@@ -12,7 +12,12 @@ namespace ninfer::artifact {
 
 // Pinned: the object lives only in one page-locked Host block laid out by the plan (for weights
 // streamed to the device on demand); it never receives a device placement.
-enum class Residency { Device, Host, Values, Pinned };
+// Mapped: the object is left in the container's read-only file mapping and never copied -- readers
+// get a span into that mapping (MaterializedArtifact::mapped_tensor_bytes). This is the residency the
+// reference gives `retain_mapped_tensor` (reference `reader.cpp:191-338`, `materializer.cpp:162-171`);
+// the port had no mapping, so it landed on Pinned and every mapped tensor became a page-locked copy.
+// Values: already-read owning bytes; it records no placement at all (see `Binder::binding`).
+enum class Residency { Device, Host, Values, Pinned, Mapped };
 
 struct ParameterReference {
     std::string name;
@@ -66,6 +71,9 @@ public:
     // Places an object in the pinned Host block, in first-request order so a caller's logical
     // groups stay contiguous. It excludes device and Host placements of the same object.
     void require_pinned(ObjectHandle object);
+    // Leaves the object in the container's read-only file mapping: no copy is made at load time and
+    // no device placement follows. It excludes device, pinned and Host placements of the object.
+    void require_mapped(ObjectHandle object);
     [[nodiscard]] std::span<const std::byte> host_object(ObjectHandle object);
     [[nodiscard]] ObjectHandle resource(std::string_view component, std::string_view role);
     [[nodiscard]] HostValues values(const Binding& binding, std::optional<QType> format = {});
@@ -77,6 +85,7 @@ private:
     struct Demand {
         bool device             = false;
         bool host               = false;
+        bool mapped             = false;
         std::uint64_t alignment = 256;
         std::optional<QType> transcode;
         std::uint32_t evict_rank = 0;

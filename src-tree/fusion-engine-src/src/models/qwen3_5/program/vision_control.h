@@ -40,8 +40,14 @@ struct VisionControlPlan {
     std::vector<VisionItemControlPlan> items;
 };
 
+// General entry point: geometry comes from the model's vision config.
 [[nodiscard]] VisionControlPlan plan_vision_control(const PreparedPromptData& prompt,
                                                     const VisionConfig& config);
+// The upstream single-argument form (`qwen3_6/impl/vision/control.cpp`), which takes its geometry
+// from the architecture constants kMerge/kPositionSide rather than from a parameter. The ported
+// qwen3_8_flash_next program calls this spelling; it delegates to the overload above using the
+// vision tower's own constants.
+[[nodiscard]] VisionControlPlan plan_vision_control(const PreparedPromptData& prompt);
 [[nodiscard]] VisionControl build_vision_control(const PreparedPromptData& prompt,
                                                  const VisionControlPlan& plan,
                                                  std::uint32_t prepared_item_begin);

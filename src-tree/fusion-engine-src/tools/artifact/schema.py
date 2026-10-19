@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from math import prod
 from typing import ClassVar, Mapping, Sequence, TypeAlias
@@ -129,6 +129,11 @@ class Directory:
     files: tuple[FileRecord, ...]
     metadata: dict
     provenance: dict
+    # What the container says it is. `src/artifact/schema.cpp` requires this block with both members
+    # and the ported qwen3_8_flash_next loader asserts the pair it expects, so a v3 directory is not
+    # complete without it. Last field, with a default, so every existing construction site stays
+    # valid and only `to_json` has to grow.
+    identity: dict = field(default_factory=dict)
 
     @property
     def payload_bytes(self) -> int:
@@ -143,6 +148,7 @@ class Directory:
             "files": [asdict(file) for file in self.files],
             "metadata": self.metadata,
             "provenance": self.provenance,
+            "identity": self.identity,
         }
 
 
@@ -301,9 +307,18 @@ def parse_directory(value: object, *, entry_name: str | None = None) -> Director
     root = members(
         value,
         {"components", "objects", "bindings", "uses", "files"},
-        {"metadata", "provenance"},
+        {"metadata", "provenance", "identity"},
         "directory",
     )
+    # Required where the engine requires it (src/artifact/schema.cpp parses `identity` with both
+    # members and no default). Kept required here too so a container this tooling writes cannot pass
+    # validation while being unloadable: the two parsers must agree on what a complete v3 is.
+    raw_identity = root["identity"]
+    identity = members(raw_identity, {"model_id", "weights_id"}, set(), "artifact identity")
+    for key in ("model_id", "weights_id"):
+        value_of = identity[key]
+        if not isinstance(value_of, str) or not value_of:
+            raise ArtifactError(f"artifact identity {key} must be a nonempty string")
     files = _files(root["files"], entry_name)
     raw_objects = root["objects"]
     if not isinstance(raw_objects, list) or not raw_objects:
@@ -392,7 +407,7 @@ def parse_directory(value: object, *, entry_name: str | None = None) -> Director
     if "name" in metadata:
         identifier(metadata["name"], "metadata.name")
     return Directory(
-        components, objects, bindings, tuple(uses), files, metadata, provenance
+        components, objects, bindings, tuple(uses), files, metadata, provenance, identity
     )
 
 

@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -181,6 +184,18 @@ private:
     bool finished_                  = false;
 };
 
+// Block-8 alignment item 2: the device-wait line. Off unless the environment names it, so the OFF
+// arm's stderr stays byte-identical. The numbers come from the ExecutionTiming the Program already
+// reclassifies per round (`runtime/contract/timing.h`: submit -> device-wait, applied at finish),
+// which the Engine fills into every GenerationResult -- this line reads it, it adds no timer.
+bool wait_line_requested() {
+    static const bool requested = [] {
+        const char* value = std::getenv("NINFER_FLASH_NEXT_WAIT_LINE");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return requested;
+}
+
 void print_generation_summary(const ninfer::GenerationResult& result,
                               const ninfer::ResolvedSamplingParameters& sampling,
                               const ninfer::MemorySummary& memory) {
@@ -213,6 +228,22 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                  format_rate(static_cast<double>(decoded), result.timings.decode_seconds));
     print_metric("throughput (overall)",
                  format_rate(static_cast<double>(generated), model_seconds));
+    if (wait_line_requested()) {
+        const ninfer::GenerationEngineTiming& engine = result.engine_timing;
+        std::ostringstream wait;
+        if (engine.decode_rounds == 0) {
+            wait << "wait=n/a host=n/a";
+        } else {
+            const double rounds = static_cast<double>(engine.decode_rounds);
+            wait << std::fixed << std::setprecision(1)
+                 << "wait=" << engine.decode_device_wait_exposed_seconds * 1.0e6 / rounds
+                 << "us/round host=" << engine.decode_host_exposed_seconds * 1.0e6 / rounds
+                 << "us/round";
+        }
+        wait << " rounds=" << engine.decode_rounds << " total=" << std::setprecision(1)
+             << engine.device_wait_exposed_seconds * 1.0e3 << "ms";
+        print_metric("engine wait", wait.str());
+    }
 
     const std::uint64_t reserved = static_cast<std::uint64_t>(memory.weights.capacity_bytes) +
                                    memory.runtime_reservation_bytes;
@@ -265,6 +296,80 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     }
 }
 
+// ---- Tier-0 item 0-1: opt THIS process out of Windows EcoQoS execution-speed throttling ----------
+//
+// Windows classifies processes it considers background and runs them under "EcoQoS": execution speed
+// throttling. Measured on this machine on 2026-10-14 (8 arms, mirrored order, byte-identical counters
+// and byte-identical token ids): opting out is worth +22.3 % decode and -19 % load on the pinned tier
+// (4 vs 4 arms), and it lifts the mapped tier above its whole historical range. The effect is NOT
+// CPU frequency: an in-process pure-CPU control showed -0.62 % (see the campaign's S1g reading), so
+// it is something about this workload's thread/IO shape. Only the process itself can ask for the
+// exemption -- there is no launcher-free equivalent -- which is why it lives in the engine.
+//
+// Declarations: NOT hand-written. The first attempt declared these by hand (the same trick that works
+// in the staging TU) and the host compile rejected it -- C2116 "different declarations do not match"
+// plus C2733 "cannot overload a function with C linkage" -- which is positive evidence that this TU
+// already sees the real prototypes transitively (windows.h through ninfer/engine.h). So the official
+// declarations are used, with the class ordinal and the size cast to their declared types. The staging
+// TU keeps its hand declarations because that TU compiled clean with them.
+//
+// Default OFF, like every other switch in this tree: unset / empty / "0" all mean off, and the OFF
+// path does nothing but print its own self-attestation line.
+
+struct PowerThrottlingState {
+    unsigned long version;
+    unsigned long control_mask;
+    unsigned long state_mask;
+};
+
+constexpr int kProcessPowerThrottling = 4;       // PROCESS_INFORMATION_CLASS
+constexpr unsigned long kExecutionSpeed = 0x1UL; // PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+constexpr unsigned long kThrottlingVersion = 1;  // PROCESS_POWER_THROTTLING_CURRENT_VERSION
+
+const char* power_throttling_verdict() {
+    PowerThrottlingState state{};
+    state.version = kThrottlingVersion;
+    if (GetProcessInformation(GetCurrentProcess(),
+                              static_cast<PROCESS_INFORMATION_CLASS>(kProcessPowerThrottling), &state,
+                              static_cast<DWORD>(sizeof(state))) == 0) {
+        return "QUERY_FAILED";
+    }
+    if ((state.control_mask & kExecutionSpeed) != 0UL && (state.state_mask & kExecutionSpeed) == 0UL) {
+        return "EXEMPT";
+    }
+    if ((state.state_mask & kExecutionSpeed) != 0UL) { return "THROTTLED"; }
+    return "NO_CONTROL";
+}
+
+bool power_exempt_requested() {
+    static const bool requested = [] {
+        const char* value = std::getenv("NINFER_FLASH_NEXT_POWER_EXEMPT");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return requested;
+}
+
+// Called once, as early in main() as the options allow: the load path (63 GiB of pinning and copies)
+// is as throttling-sensitive as the decode path, so this must not wait for model construction.
+void apply_power_exemption_if_requested() {
+    const bool requested = power_exempt_requested();
+    if (!requested) {
+        std::fprintf(stderr, "flash_next power_exempt=0 set=not_requested verdict=%s\n",
+                     power_throttling_verdict());
+        return;
+    }
+    PowerThrottlingState state{};
+    state.version      = kThrottlingVersion;
+    state.control_mask = kExecutionSpeed;
+    state.state_mask   = 0UL; // 0 = do NOT throttle execution speed
+    const bool ok =
+        SetProcessInformation(GetCurrentProcess(),
+                              static_cast<PROCESS_INFORMATION_CLASS>(kProcessPowerThrottling), &state,
+                              static_cast<DWORD>(sizeof(state))) != 0;
+    std::fprintf(stderr, "flash_next power_exempt=1 set=%s verdict=%s\n", ok ? "SET_OK" : "SET_FAILED",
+                 power_throttling_verdict());
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -281,6 +386,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     log_colours_flag = cli.log_colours;
+    apply_power_exemption_if_requested();
 
     ninfer::product::LoggingRuntime logging(
         {.logger_name  = "ninfer",
@@ -351,6 +457,12 @@ int main(int argc, char** argv) {
 
         ninfer::Engine engine(std::move(engine_options));
         startup_log.engine_ready(engine.load_summary());
+        std::fprintf(stderr,
+                     "[spec] backend=%s draft_tokens=%u adaptive=%u attention_window=%u ngram=%u\n",
+                     ninfer::product::speculative_backend_name(engine_options.speculative.backend), engine_options.speculative.draft_tokens,
+                     engine_options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive ? 1U : 0U,
+                     engine_options.speculative.mtp_attention_window,
+                     engine_options.speculative.ngram_draft_tokens);
         engine.reset_memory_peaks();
 
         ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));

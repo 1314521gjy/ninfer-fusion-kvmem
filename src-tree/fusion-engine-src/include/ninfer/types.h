@@ -72,6 +72,15 @@ enum class KvCacheStorage : std::uint8_t {
     RotatedE8RootKeyInt4Value,
 };
 
+// How the Gated DeltaNet recurrent state is stored between rounds. Upstream declares this next to
+// KvCacheStorage in `serve_options.h`; here it belongs beside the KV storage choice it mirrors. This
+// engine used to express the same choice as a `gdn_state_fp16` flag -- an enum names three states
+// without a bool per pair and is what the ported qwen3_8_flash_next layer expects.
+enum class GdnStateStorage : std::uint8_t {
+    FP32,
+    BF16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -417,6 +426,18 @@ struct EngineOptions {
     // per-slot host state image.
     bool lm_head_q4                        = false;
     bool gdn_state_fp16                    = false;
+    // How the Gated DeltaNet recurrent state is stored. Upstream's serve option; FP32 is its
+    // default and matches `gdn_state_fp16 == false`, so the two spellings agree at the default. Set
+    // both for a non-default choice: `gdn_state_fp16` still drives this engine's own path.
+    GdnStateStorage gdn_state_storage      = GdnStateStorage::FP32;
+    // FP8 (E4M3) requantization of two BF16 tensors at load, ported from the upstream serve
+    // options: the output head and the token embedding are kept in the container and quantized from
+    // the retained Host bytes. Both default off.
+    bool quantize_output_head_fp8          = false;
+    bool quantize_token_embedding_fp8      = false;
+    // Whether the QSA prefill path may use the MMA (tensor-core) kernel instead of the SIMT one.
+    // Upstream defaults this on; the ported qwen3_8_flash_next planner reads it directly.
+    bool use_qsa_prefill_mma               = true;
     // Device-memory trades that store a W8 vocabulary matrix at a narrower group-64 width while
     // the weights load (the artifact is unchanged). lm_head_q6 saves ~26% of the output head for
     // +0.01% perplexity; embedding_q4 halves the token embedding with no measurable perplexity
@@ -740,6 +761,42 @@ enum class ReasoningEffort : std::uint8_t {
     }
     return {};
 }
+
+// Which reasoning efforts a compiled prompt template can actually produce, and which one it picks
+// when the caller names none. A caller that wants to report the choice -- a model card, a serve
+// error message -- needs this rather than `ReasoningEffort`, which is the effort a caller ASKS for.
+//
+// This engine's `ReasoningEffort` carries seven values; the ported Flash-Next target's template
+// advertises only the three below, so the flags are what a template can turn on, not a copy of the
+// enum.
+struct ReasoningEffortCapabilities {
+    bool low    = false;
+    bool medium = false;
+    bool xhigh  = false;
+    std::optional<ReasoningEffort> default_effort;
+
+    [[nodiscard]] constexpr bool supports(ReasoningEffort effort) const noexcept {
+        switch (effort) {
+        case ReasoningEffort::Low:
+            return low;
+        case ReasoningEffort::Medium:
+            return medium;
+        case ReasoningEffort::XHigh:
+            return xhigh;
+        default:
+            // Every other effort this engine knows is not one this struct can advertise, so it is
+            // unsupported rather than silently mapped onto the nearest flag.
+            return false;
+        }
+    }
+};
+
+// What a compiled template offers for the thinking phase: whether it has one at all, and which
+// efforts it accepts. The ported Flash-Next frontend returns this from `prompt_capabilities()`.
+struct PromptCapabilities {
+    bool enable_thinking = false;
+    ReasoningEffortCapabilities reasoning_effort;
+};
 
 enum class PromptContinuationMode : std::uint8_t {
     NewAssistantTurn,

@@ -31,7 +31,8 @@ add_library(ninfer_ggml_quants STATIC
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_iq1_s.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_iq1_m.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_iq4_nl.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_iq4_xs.cu")
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_iq4_xs.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_q2_0.cu")
 target_include_directories(ninfer_ggml_quants PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}"
   "${NINFER_GGML_QUANTS_ROOT}/include"

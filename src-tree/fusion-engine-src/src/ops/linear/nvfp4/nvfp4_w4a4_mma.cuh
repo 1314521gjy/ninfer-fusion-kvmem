@@ -487,6 +487,9 @@ __device__ __forceinline__ std::int64_t nvfp4_tiled_scale_offset(int token, int 
            (group - group_tile * kGroupsPerTile);
 }
 
+// Six-argument form: this tree's own callers. It adds a padded-extent bound and a tiled scale layout
+// over the five-argument upstream form below, so it keeps all three template parameters explicit --
+// giving them defaults would make the upstream spelling ambiguous between the two overloads.
 template <class Geometry, int Threads, Nvfp4ScaleLayout Layout>
 __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_kernel(
     const __nv_bfloat16* __restrict__ input, std::uint8_t* __restrict__ codes,
@@ -529,6 +532,40 @@ __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_ke
     } else {
         scales[static_cast<std::int64_t>(token) * kGroupsPerRow + group] = quantized.scale;
     }
+}
+
+// Upstream has exactly one quantizer and it takes no `written_tokens`
+// (upstream ops/linear/nvfp4/nvfp4_w4a4_mma.cuh:387-407):
+//
+//     template <class Geometry, int Threads = 256>
+//     ... nvfp4_w4a4_quantize_kernel(input, codes, scales, tokens, input_scale_divisor)
+//
+// The ported qwen3_8_flash_next MoE path calls that spelling, so this overload carries the upstream
+// body verbatim. It is NOT a shim around the kernel above: the two differ in what they can express --
+// the five-argument form writes scales row-major only and has no padded-tile extent, which is exactly
+// upstream's contract -- and its four statements are upstream's, kept as-is so the two can be diffed
+// against the source. `written_tokens` and the tiled layout stay available through the six-argument
+// form this tree's own callers use.
+template <class Geometry, int Threads = 256>
+__global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_kernel(
+    const __nv_bfloat16* __restrict__ input, std::uint8_t* __restrict__ codes,
+    std::uint8_t* __restrict__ scales, std::int32_t tokens, float input_scale_divisor) {
+    static_assert(Threads == 128 || Threads == 256 || Threads == 512);
+    constexpr int kGroupsPerRow = Geometry::kInputRows / 16;
+    const int task =
+        static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    const int tasks = tokens * kGroupsPerRow;
+    if (task >= tasks) { return; }
+
+    const int token                   = task / kGroupsPerRow;
+    const int group                   = task - token * kGroupsPerRow;
+    const Nvfp4QuantizedK16 quantized = quantize_nvfp4_k16(
+        input + static_cast<std::int64_t>(token) * Geometry::kInputRows + group * 16,
+        input_scale_divisor);
+    auto* code_destination =
+        codes + static_cast<std::int64_t>(token) * Geometry::kCodeBytesPerRow + group * 8;
+    store_vec(code_destination, make_uint2(quantized.codes_lo, quantized.codes_hi));
+    scales[static_cast<std::int64_t>(token) * kGroupsPerRow + group] = quantized.scale;
 }
 
 } // namespace ninfer::ops::detail

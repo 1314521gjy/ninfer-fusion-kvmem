@@ -10,16 +10,21 @@
 #include "core/startup.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
+// The ported facade takes the *upstream* `artifact::Binder`, and this generation names that type
+// differently, so the assembler reaches it through the adapter. Include written the way the other
+// consumer writes it (`src/artifact/typed_binding.h:18`).
+#include "models/qwen3_8_flash_next/impl/port/binder_port.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
 #include <chrono>
-#include <cstdio>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -356,32 +361,6 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     return options;
 }
 
-ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
-                             const EngineOptions& options)
-    : model(std::move(source)), parameters(*model),
-      frontend(models::qwen3_5::make_frontend(
-          model->resources(),
-          {.chat_template_path       = options.chat_template_path,
-           .architecture             = model->config().text.architecture,
-           .vision_enabled           = options.enable_vision,
-           .max_context              = options.max_context,
-           .media_cache_bytes        = options.media_cache_bytes,
-           .media_live_bytes         = options.media_live_bytes,
-           .media_preprocess_threads = options.media_preprocess_threads,
-           .vision_max_merged_tokens = options.vision_max_merged_tokens,
-           .thinking_budget_message  = options.thinking_budget_message,
-           .ngram_sources_enabled    = options.speculative.ngram_draft_tokens != 0,
-           .ngram_archive_enabled    = options.speculative.ngram_archive_bytes != 0,
-           .automatic_long_anchors =
-               options.context_cache.automatic_long_anchors
-                   ? options.context_cache.max_long_anchors_per_continuation.value_or(0U)
-                   : 0U,
-           .long_anchor_min_spacing_tokens =
-               options.context_cache.long_anchor_min_spacing_tokens})),
-      capacity(options.max_context) {}
-
-ModelInstance::~ModelInstance() = default;
-
 namespace {
 
 // Installs each rank's GPU route profile before any Op runs (see EngineOptions::device_profile).
@@ -451,16 +430,76 @@ void install_device_route_profile_for(const EngineOptions& options, const Device
 
 } // namespace
 
-ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& device) {
-    validate_options(requested);
-    install_device_route_profile_for(requested, device);
-    const auto start = Clock::now();
-    // Every later stage of startup checks its options against the ones the model was loaded with, so
-    // the stage split is decided once, here, and carried in the options from then on.
+// ---------------------------------------------------------------------------
+// The two target families' loaders and instances.
+//
+// Reference shape: `src/targets/registry.cpp:299-356` - a `Loaded*` constructor that takes the
+// loaded weights and the options, and an `*Instance` constructor that takes the loaded struct, the
+// resolved KV capacity, the finalized sequence plan, the device and the startup observer. The
+// bodies below follow those two constructors; where the fusion model's own API differs from the
+// reference target's static facade, the call used is the one this engine already made before this
+// change (so behaviour on the fusion path is unchanged).
+// ---------------------------------------------------------------------------
+
+LoadedQwen3_5::LoadedQwen3_5(std::unique_ptr<models::qwen3_5::Model> stable_model,
+                             const EngineOptions& options)
+    : model(std::move(stable_model)), parameters(*model),
+      frontend(models::qwen3_5::make_frontend(
+          model->resources(),
+          {.chat_template_path       = options.chat_template_path,
+           .architecture             = model->config().text.architecture,
+           .vision_enabled           = options.enable_vision,
+           .max_context              = options.max_context,
+           .media_cache_bytes        = options.media_cache_bytes,
+           .media_live_bytes         = options.media_live_bytes,
+           .media_preprocess_threads = options.media_preprocess_threads,
+           .vision_max_merged_tokens = options.vision_max_merged_tokens,
+           .thinking_budget_message  = options.thinking_budget_message,
+           .ngram_sources_enabled    = options.speculative.ngram_draft_tokens != 0,
+           .ngram_archive_enabled    = options.speculative.ngram_archive_bytes != 0,
+           .automatic_long_anchors =
+               options.context_cache.automatic_long_anchors
+                   ? options.context_cache.max_long_anchors_per_continuation.value_or(0U)
+                   : 0U,
+           .long_anchor_min_spacing_tokens =
+               options.context_cache.long_anchor_min_spacing_tokens})) {}
+
+ModelInstance::ModelInstance(std::unique_ptr<LoadedQwen3_5> stable_loaded,
+                             KvCapacityResolution resolution,
+                             models::qwen3_5::SequencePlan sequence_plan, DeviceContext& device,
+                             const StartupObserver& startup_observer)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
+      capacity(sequence_plan.capacity()),
+      program(models::qwen3_5::create_program(loaded->parameters, std::move(sequence_plan), device,
+                                              startup_observer)) {}
+
+ModelInstance::~ModelInstance() = default;
+
+// The ported target owns a `Package::LoadedModel` (weights + frontend-resource bundle + the model
+// views its executor reads), so its instance is built the way the reference builds its targets:
+// `Loaded` holds the frontend, `Instance` builds the Program from `create_program`.
+LoadedQwen4FlashNext::LoadedQwen4FlashNext(
+    std::unique_ptr<models::qwen3_8_flash_next::Package::LoadedModel> stable_model,
+    const EngineOptions& options)
+    : model(std::move(stable_model)),
+      frontend(models::qwen3_8_flash_next::Package::make_frontend(*model, options)) {}
+
+FlashNextInstance::FlashNextInstance(std::unique_ptr<LoadedQwen4FlashNext> stable_loaded,
+                                     KvCapacityResolution resolution,
+                                     models::qwen3_8_flash_next::SequencePlan sequence_plan,
+                                     DeviceContext& device,
+                                     const StartupObserver& startup_observer)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
+      capacity(sequence_plan.capacity()),
+      program(models::qwen3_8_flash_next::Package::create_program(*loaded->model,
+                                                                  std::move(sequence_plan), device,
+                                                                  startup_observer)) {}
+
+FlashNextInstance::~FlashNextInstance() = default;
+
+ConstructedModel assemble_fusion(const EngineOptions& requested, DeviceContext& device,
+                                 artifact::Reader& reader, Clock::time_point start) {
     EngineOptions options = requested;
-    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
-    artifact::Reader reader(options.artifact_path);
-    inspect.complete();
     if (options.devices.size() > 1 && options.stage_layers.empty()) {
         const std::vector<std::size_t> free_now = free_bytes_by_rank(device);
         const std::vector<std::uint64_t> free_bytes(free_now.begin(), free_now.end());
@@ -479,23 +518,26 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
         models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
     device.synchronize();
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
-    auto instance = std::make_unique<ModelInstance>(std::move(model), options);
+    // Two stages because the Program cannot be built before the sequence plan exists: the reference
+    // does the same split (`src/targets/registry.cpp:215` makes the `Loaded`, `:221` the `Instance`
+    // that creates the Program from the finalized plan).
+    auto loaded = std::make_unique<LoadedQwen3_5>(std::move(model), options);
     frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
     const std::size_t overlay_window_bytes =
-        models::qwen3_5::prepare_vision_overlay(instance->parameters, device, options);
-    const auto signature = models::qwen3_5::prefill_signature(*instance->model);
+        models::qwen3_5::prepare_vision_overlay(loaded->parameters, device, options);
+    const auto signature = models::qwen3_5::prefill_signature(*loaded->model);
     auto context_cost    = resolve_context_machine_cost(
         {.hardware_class =
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
     auto planner = models::qwen3_5::make_sequence_planner(
-        instance->parameters, device,
-        artifact_scoped_disk_tier(options, instance->model->info().artifact_id));
+        loaded->parameters, device,
+        artifact_scoped_disk_tier(options, loaded->model->info().artifact_id));
     const std::vector<std::size_t> free_by_rank =
         free_bytes_by_rank(device, options.wddm_evictable_budget,
-                           instance->model->storage_stats().device_capacity_bytes);
+                           loaded->model->storage_stats().device_capacity_bytes);
     auto resolution = resolve_kv_capacity(
         options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
         std::span<const std::size_t>(free_by_rank).subspan(1));
@@ -513,13 +555,15 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     // on the same capacity instead of a silently divergent default.
     EngineOptions resolved = options;
     resolved.context_cache = sequence.context_cache_options();
-    instance->frontend.publish_long_anchor_limit(
+    loaded->frontend.publish_long_anchor_limit(
         resolved.context_cache.max_long_anchors_per_continuation.value_or(0));
-    instance->kv_capacity_resolution = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
-    instance->program = models::qwen3_5::create_program(instance->parameters, std::move(sequence),
-                                                        device, options.startup_observer);
+    // The instance builds its own Program from the finalized plan (reference:
+    // `src/targets/registry.cpp:221-223`).
+    auto instance = std::make_unique<ModelInstance>(std::move(loaded), resolution,
+                                                    std::move(sequence), device,
+                                                    options.startup_observer);
     LoadSummary::PrefixCacheRestore restore;
     if (resolved.context_cache.enabled && resolved.context_cache.mode == ContextCacheMode::Hybrid) {
         instance->program->set_hybrid_cost(hybrid_cache_cost(context_cost.model));
@@ -546,13 +590,13 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     device.synchronize();
     program.complete();
     instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
-    const auto& stats = instance->model->storage_stats();
+    const auto& stats = instance->loaded->model->storage_stats();
     LoadSummary summary;
-    summary.architecture = models::architecture_name(instance->model->config().text.architecture);
-    summary.model_name   = instance->model->info().name;
+    summary.architecture = models::architecture_name(instance->loaded->model->config().text.architecture);
+    summary.model_name   = instance->loaded->model->info().name;
     summary.prefill_signature = signature;
     std::set<std::string> formats;
-    for (const auto& weight : instance->model->weight_data()) {
+    for (const auto& weight : instance->loaded->model->weight_data()) {
         for (const auto& part : weight.view.parts) {
             formats.emplace(artifact::format_name(part.parent->geometry.format));
         }
@@ -573,7 +617,7 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     // Static /v1/models metadata: the model identity and dimension facts come from the loaded
     // model; the parameters, weight bytes, and weights profile are pure functions of the
     // artifact's tensor inventory.
-    const auto& text_config = instance->model->config().text;
+    const auto& text_config = instance->loaded->model->config().text;
     ModelMetadata metadata;
     metadata.model_id       = summary.model_name;
     metadata.vocab_size     = text_config.vocab_size;
@@ -599,6 +643,182 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     }
     return {std::move(instance), std::move(summary), std::move(metadata),
             std::move(context_cost.model), std::move(resolved)};
+}
+
+// ---------------------------------------------------------------------------
+// The ported Flash-Next target (Qwen3.8-Flash-Next = the Qwen4 preview).
+//
+// Reference: `src/targets/registry.cpp:358-385` selects a target by `identity.model_id` and hands
+// the whole assembly to `construct_registered<Target, Loaded, Instance>` (`:102-283`). That
+// function is a template, so its `Instance` is a compile-time type and every `instance->...` keeps
+// working unchanged. This engine's `construct_model` is one non-template function whose body reads
+// model-specific members in twelve places spread over 150 lines, so the ported family gets its own
+// assembler here instead of a branch inside that body. The fusion family's assembler is
+// `construct_model` itself, untouched.
+//
+// `new_write_note`: the reference has no second assembler because its families are template
+// parameters; splitting by function is how this engine's single entry point carries two families.
+// ---------------------------------------------------------------------------
+ConstructedModel assemble_flash_next(const EngineOptions& requested, DeviceContext& device,
+                                    artifact::Reader& reader, Clock::time_point start) {
+    EngineOptions options = requested;
+    StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
+    // `construct_registered` builds through the target's static facade
+    // (`src/targets/registry.cpp:120-147`); the calls below are that sequence.
+    artifact::Binder engine_binder(reader);
+    // No adapter here. Reference: `registry.cpp:120-121` is `artifact::Binder binder(reader);` then
+    // `Target::plan_load(binder, options, weights_profile)` -- the ENGINE binder goes straight in,
+    // and the port layer builds its own adapter inside (`impl/load/bindings.h`). Constructing a
+    // `ninfer::port::Binder` at this call site was my invention, and it cannot work: `plan_load`
+    // takes `ninfer::artifact::Binder&`, which an adapter cannot convert to.
+    const auto weights_profile =
+        models::qwen3_8_flash_next::Package::resolve_weights(reader.identity());
+    auto load_plan =
+        models::qwen3_8_flash_next::Package::plan_load(engine_binder, options, weights_profile);
+    // `load_plan.materialization()` is this engine's own MaterializationPlan: the adapter's
+    // `finish()` forwards to the engine binder (`binder_port.h:296`).
+    auto materialized = artifact::materialize(reader, load_plan.materialization(), device,
+                                             &options.startup_observer);
+    // Read the stats here, while `materialized` is live. The ported `LoadedModel` is an opaque
+    // pimpl with no accessor (`package.h:47-62`: one private `impl_`, friend `Package` only), so
+    // this is the only reachable source -- and it is the same object the loaded model retains.
+    const artifact::MaterializationStats materialized_stats = materialized.stats();
+    auto loaded = std::make_unique<LoadedQwen4FlashNext>(
+        models::qwen3_8_flash_next::Package::construct_loaded_model(std::move(load_plan),
+                                                                   std::move(materialized)),
+        options);
+    const std::uint64_t planned_materialization_bytes = materialized_stats.device_capacity_bytes;
+    binding.complete();
+    device.synchronize();
+    StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
+    auto planner = models::qwen3_8_flash_next::Package::make_sequence_planner(device, options,
+                                                                             weights_profile);
+    const std::vector<std::size_t> free_by_rank =
+        free_bytes_by_rank(device, options.wddm_evictable_budget, planned_materialization_bytes);
+    auto resolution = resolve_kv_capacity(
+        options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
+        std::span<const std::size_t>(free_by_rank).subspan(1));
+    auto sequence = std::move(planner).finalize(resolution.main_page_groups);
+    // The reference checks three quantities here (`registry.cpp:203-206`); the ported SequencePlan
+    // exposes two of them (no `extra_rank_reservation_bytes`, `runtime.h:625-629`).
+    if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
+        sequence.kv_capacity() != resolution.resolved_tokens) {
+        throw std::logic_error("resolved KV capacity does not match the finalized plan");
+    }
+    // `resolved.context_cache` is not taken from the plan here: the fusion SequencePlan exposes
+    // `context_cache_options()` and the ported one does not, so the requested options stand - they
+    // are what the ported Program planned against.
+    EngineOptions resolved = options;
+    loaded->frontend.publish_long_anchor_limit(
+        resolved.context_cache.max_long_anchors_per_continuation.value_or(0));
+    planning.complete();
+    StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
+    auto instance = std::make_unique<FlashNextInstance>(
+        std::move(loaded), resolution, std::move(sequence), device, options.startup_observer);
+    device.synchronize();
+    program.complete();
+    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+
+    const artifact::MaterializationStats& stats = materialized_stats;
+    const artifact::ArtifactIdentity& identity = reader.identity();
+    LoadSummary summary;
+    // Reference: `summary.model_id = identity.model_id` (`registry.cpp:280`). The fusion engine
+    // reports the architecture name and a model name as well; the ported family has no
+    // `qwen3_5::Config`, so `architecture` comes from the identity pair the artifact carries and
+    // `model_name` from its `model_id`.
+    summary.architecture        = std::string(identity.model_id);
+    summary.model_name          = std::string(identity.model_id);
+    summary.prefill_signature   = std::string(identity.model_id) + "/" + identity.weights_id;
+    summary.load_seconds        = std::chrono::duration<double>(Clock::now() - start).count();
+    summary.upload_seconds      = stats.upload_seconds;
+    summary.artifact_bytes_read = stats.read_bytes;
+    summary.host_to_device_bytes = stats.h2d_bytes;
+    summary.peak_staging_bytes  = stats.peak_staging_bytes;
+    summary.pinned_weight_bytes = stats.pinned_bytes;
+    summary.overlay_window_bytes = 0;
+    summary.device_object_count = stats.device_object_count;
+    summary.host_object_count   = stats.host_object_count;
+    // The engine's context-cost identity wants a non-empty `prefill_signature`
+    // (`context_cache/context_cost.cpp:568-570` throws on an empty component). The ported family has
+    // no `qwen3_5::Model` to derive one from, so it uses the artifact identity pair - which is what
+    // the reference engine's own identity carries (`runtime/engine/context_cost.h:93-97`:
+    // `model_id` + `weights_id`, filled at `src/targets/registry.cpp:114-115`).
+    const runtime::ContextCostIdentity context_cost_identity{
+        .hardware_class = context_cost_hardware_class(device.props.name, device.props.major,
+                                                      device.props.minor),
+        .prefill_signature = summary.prefill_signature,
+    };
+    auto context_cost = resolve_context_machine_cost(context_cost_identity,
+                                                     options.context_cost.preset_path);
+    summary.context_cost = std::move(context_cost.summary);
+
+    // `/v1/models` metadata. The parameter count, weight bytes and format list are pure functions
+    // of the artifact's tensor inventory (`construct_model` computes the same three from
+    // `reader.directory().objects`), so they are shared verbatim. The three model dimensions that
+    // the fusion path reads from `qwen3_5::Config` have no source here yet: the ported family keeps
+    // its geometry in `TextModelView` (a fixed-shape view, `impl/model_view.h:108-119`) and the
+    // reference engine does not report them at all (no `vocab_size` / `embedding_size` /
+    // `native_context` anywhere in its tree). Left zero, to be filled from the artifact's stored
+    // text config later.
+    ModelMetadata metadata;
+    metadata.model_id = summary.model_name;
+    std::uint64_t parameters   = 0;
+    std::uint64_t weight_bytes = 0;
+    std::set<std::string> tensor_formats;
+    for (const auto& object : reader.directory().objects) {
+        const auto* tensor = std::get_if<artifact::TensorObject>(&object);
+        if (tensor == nullptr) { continue; } // Non-weight resources (tokenizer, templates).
+        std::uint64_t elements = 1;
+        for (const auto dimension : tensor->shape) { elements *= dimension; }
+        parameters     += elements;
+        weight_bytes   += tensor->bytes;
+        tensor_formats.emplace(tensor->format);
+    }
+    metadata.parameters   = parameters;
+    metadata.weight_bytes = weight_bytes;
+    for (const auto& format : tensor_formats) {
+        if (!metadata.weights_id.empty()) { metadata.weights_id += "+"; }
+        metadata.weights_id += format;
+    }
+    summary.weight_formats.assign(tensor_formats.begin(), tensor_formats.end());
+
+    ActiveTarget active = std::move(instance);
+    return {std::move(active), std::move(summary), std::move(metadata),
+            std::move(context_cost.model), std::move(resolved)};
+}
+
+// Picks the assembler by the artifact identity, exactly as the reference engine picks a target
+// (`src/targets/registry.cpp:365-382`). The two assemblers exist because the families' planning
+// types are not interchangeable; `assemble_fusion` is this engine's original body, unchanged.
+ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
+    validate_options(options);
+    // Block-7 alignment ④: snapshot the artifact path into the line's EXISTING by-path read
+    // convention (NINFER_FLASH_NEXT_ARTIFACT_PATH -- read by impl/load/materialized.cpp:425 and now
+    // by the optional PLE direct-read face). Set from the artifact the engine actually opened, which
+    // is the ground truth; harmless to the older consumer, whose activation gate
+    // (NINFER_FLASH_NEXT_PIN_READFILE mode > 0) is separate and unchanged. Deleting this block rolls
+    // the direct face back to the mapped path with no other edit.
+    {
+        std::error_code path_ec;
+        const std::filesystem::path absolute_path =
+            std::filesystem::absolute(options.artifact_path, path_ec);
+        const std::u8string wide = (path_ec ? options.artifact_path : absolute_path).u8string();
+        const std::string utf8(reinterpret_cast<const char*>(wide.c_str()), wide.size());
+#if defined(_WIN32)
+        _putenv_s("NINFER_FLASH_NEXT_ARTIFACT_PATH", utf8.c_str());
+#else
+        setenv("NINFER_FLASH_NEXT_ARTIFACT_PATH", utf8.c_str(), 1);
+#endif
+    }
+    install_device_route_profile_for(options, device);
+    const auto start = Clock::now();
+    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
+    artifact::Reader reader(options.artifact_path);
+    inspect.complete();
+    if (reader.identity().model_id == models::qwen3_8_flash_next::Package::model_id) {
+        return assemble_flash_next(options, device, reader, start);
+    }
+    return assemble_fusion(options, device, reader, start);
 }
 
 } // namespace ninfer::runtime

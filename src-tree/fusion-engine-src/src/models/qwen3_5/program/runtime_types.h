@@ -25,6 +25,9 @@ struct RuntimeTypes {
     using ContinuationSummary        = qwen3_5::ContinuationSummary;
     using SharedPrefixSummary        = qwen3_5::SharedPrefixSummary;
     using PressurePlanningSession    = qwen3_5::PressurePlanningSession;
+    // Enables ContractPlanner's MaterializationPlanner specialisation (resource_manager.h:205-210):
+    // the class already derives from runtime::RecencyLadderSupported (program.h:754).
+    using CapturePressurePlanningSession = qwen3_5::CapturePressurePlanningSession;
     using PressureTargetHandle       = qwen3_5::PressureTargetHandle;
     using AssessedPressureTarget     = qwen3_5::AssessedPressureTarget;
     using CapturePressurePlan        = qwen3_5::CapturePressurePlan;

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Implements: include/ninfer/ops/sampling.h
 // Match: contiguous BF16 logits, physical stride >= token domain, and at most
@@ -29,7 +29,7 @@ __launch_bounds__(kSamplerBlock) __global__
         float bv             = -CUDART_INF_F;
         int bi               = INT_MAX;
         const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
-                               cfg.token_mask != nullptr;
+                               cfg.token_mask != nullptr || cfg.allowed_tokens != nullptr;
         if (!penalties) {
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float x = __bfloat162float(logits[base + v]);
@@ -128,7 +128,7 @@ __launch_bounds__(kSamplerBlock) __global__
 
     const bool greedy       = !(cfg.temperature > 0.0f);
     const bool penalties =
-        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr;
+        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr || cfg.allowed_tokens != nullptr;
     const int cap           = greedy ? 1 : sampling_candidate_cap(cfg, token_domain);
     const std::int64_t base = static_cast<std::int64_t>(col) * physical_rows;
     const int tile_start    = partial * kSamplerPartialTileItems;

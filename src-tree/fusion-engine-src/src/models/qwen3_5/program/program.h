@@ -4,6 +4,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
+#include "runtime/engine/context_cache/recency_ladder_support.h"
 #include "runtime/prefix_cache/cost.h"
 
 #include <cstddef>
@@ -48,6 +49,15 @@ struct PhysicalUsageSnapshot {
     std::uint32_t device_main_kv_lease_pages    = 0;
     std::uint32_t device_backend_kv_lease_pages = 0;
     std::size_t host_kv_bytes                   = 0;
+    // Dedicated checkpoint pool, when the Program has one; excludes active recurrent slots.
+    // Upstream declares these three on its own snapshot (qwen3_6 commit_slot.h, re-exported as
+    // `PhysicalUsageSnapshot` in qwen3_6/runtime.h) and the ported qwen3_8_flash_next program fills
+    // them, so a Program without such a pool reports "none" through the two optionals. The two
+    // lease-page fields above stay here: they are this engine's own accounting and are not part of
+    // the upstream shape.
+    std::optional<std::uint32_t> checkpoint_slots_occupied;
+    std::optional<std::uint32_t> checkpoint_slots_capacity;
+    std::uint32_t checkpoint_slots_reserved = 0;
 
     [[nodiscard]] friend constexpr bool operator==(const PhysicalUsageSnapshot&,
                                                    const PhysicalUsageSnapshot&) noexcept = default;
@@ -149,6 +159,13 @@ struct CapturePressureCandidateImpl;
 struct RequestBasePlanImpl;
 
 struct PressurePlanningSessionImpl;
+
+// The variant-supplied handle-access policy (see upstream qwen3_6/impl/runtime/program.h:1257,
+// where the session is a template over exactly this parameter, and the qwen3_8_flash_next variant
+// specializes it). This tree folds the packing into PressurePlanningSessionImpl itself, so here the
+// policy only needs to be a friend of PressureTargetHandle: that opens make_handle / get_session /
+// get_generation / get_index to it -- the four operations a variant needs -- and nothing else.
+struct FlashNextPressureHandleAccess;
 
 struct HybridQuoteImpl;
 
@@ -501,6 +518,8 @@ private:
     std::uint32_t index_      = 0;
 
     friend struct detail::PressurePlanningSessionImpl;
+    // The ported variant's handle-access policy; see the forward declaration in `detail`.
+    friend struct detail::FlashNextPressureHandleAccess;
 
     friend class PressurePlanningSession;
 };
@@ -726,7 +745,13 @@ private:
 // Typed pressure domain for one active capture. The capture candidate remains Program-owned and
 // cannot be inspected, sealed, or executed as a request admission candidate.
 
-class CapturePressurePlanningSession {
+// Declares, by inheritance, that this contract drives the ContextCache recency ladder and therefore
+// wants the engine's `MaterializationPlanner` (`runtime/engine/context_cache/resource_manager.h`).
+// That header selects the planner from this tag; a contract whose session does not derive from it
+// gets the refusing `NoPressurePlanner` instead. The tag lives there because the engine header must
+// not name any model, and it is a tag rather than a name probe because the ported contract aliases
+// the same type names.
+class CapturePressurePlanningSession : public runtime::RecencyLadderSupported {
 public:
     CapturePressurePlanningSession(CapturePressurePlanningSession&&) noexcept;
     CapturePressurePlanningSession& operator=(CapturePressurePlanningSession&&) noexcept;

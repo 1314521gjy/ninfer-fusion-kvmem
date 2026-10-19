@@ -17,7 +17,8 @@ std::size_t chunked_workspace_bytes(std::int32_t value_heads, std::int32_t token
 void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                     const Tensor& beta, float scale, const Tensor& ssm_state_in,
                     Tensor& ssm_state_out, Tensor& out, void* workspace,
-                    std::size_t workspace_bytes, cudaStream_t stream) {
+                    std::size_t workspace_bytes, cudaStream_t stream,
+                    const chunked::GdnChunkedStageHook* hook) {
     const auto layout = chunked::compute_workspace_layout(v.ne[1], q.ne[2]);
     if (workspace == nullptr || workspace_bytes < layout.total_bytes) { throw std::bad_alloc(); }
 
@@ -41,6 +42,9 @@ void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Ten
     prepare.g_cumsum_out = static_cast<float*>(g_cumsum.data);
     prepare.stream       = stream;
     CUDA_CHECK(chunked::launch_prepare_wy_wu(prepare));
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 0, stream);
+    }
 
     chunked::state_passing_config state{};
     state.H_qk      = q.ne[1];
@@ -56,6 +60,9 @@ void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Ten
     state.state_out = static_cast<float*>(ssm_state_out.data);
     state.stream    = stream;
     CUDA_CHECK(chunked::launch_state_passing(state));
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 1, stream);
+    }
 
     chunked::chunk_output_config output{};
     output.H_qk     = q.ne[1];
@@ -70,6 +77,9 @@ void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Ten
     output.scale    = scale;
     output.stream   = stream;
     CUDA_CHECK(chunked::launch_output(output));
+    if (hook != nullptr && hook->record_stage != nullptr) {
+        hook->record_stage(hook->user_data, 2, stream);
+    }
 }
 
 } // namespace ninfer::ops::detail::gated_delta_net

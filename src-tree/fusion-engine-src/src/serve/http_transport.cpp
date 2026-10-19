@@ -1,4 +1,4 @@
-#include "serve/http_transport.h"
+﻿#include "serve/http_transport.h"
 
 #include "serve/request_validation.h"
 
@@ -239,7 +239,7 @@ void configure_http_server_socket(socket_t socket) noexcept {
 
 void set_owned_json_content(httplib::Response& response, std::string body,
                             std::shared_ptr<RequestLifetime> lifetime) {
-    response.set_content(std::move(body), "application/json");
+    response.set_content(std::move(body), "application/json; charset=utf-8");
     response.user_data.set("ninfer.request_lifetime", std::move(lifetime));
 }
 

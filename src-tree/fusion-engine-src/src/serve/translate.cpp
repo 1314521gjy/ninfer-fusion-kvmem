@@ -433,10 +433,16 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     // `--presence-penalty 0` is an explicit override (sampling.cpp: overrides.value_or(preset)), so it
     // would otherwise swallow any preset the frontend resolved. Only requests that are actually in
     // thinking mode are touched -- the NonThinking/tool channel keeps the global value.
-    if (semantics.enable_thinking != false && server.thinking_presence_penalty.has_value()) {
-        options.execution.sampling.presence_penalty = *server.thinking_presence_penalty;
-    }
-    options.execution.post_thinking_sampling =
+    // S2b (issue #3): the chain is request > server flag > mode preset. Absent at both levels means
+    // the frontend preset stands (qwen3_5 thinking = 1.5); an EXPLICIT request-level 0 is a real
+    // override, which is why both layers are std::optional and neither uses value_or.
+    if (semantics.enable_thinking != false) {
+        if (request.thinking_presence_penalty.has_value()) {
+            options.execution.sampling.presence_penalty = *request.thinking_presence_penalty;
+        } else if (server.thinking_presence_penalty.has_value()) {
+            options.execution.sampling.presence_penalty = *server.thinking_presence_penalty;
+        }
+    }    options.execution.post_thinking_sampling =
         resolve_post_thinking_overrides(request.post_thinking, server);
     options.execution.first_token_top_logprobs = request.first_token_top_logprobs;
     options.output.raw                     = false;

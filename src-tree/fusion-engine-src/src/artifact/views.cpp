@@ -7,6 +7,12 @@ WeightView bind_view(const ParameterReference& reference,
     if (reference.residency == Residency::Values) {
         throw ArtifactError(reference.name + ": owning values do not have parent backing");
     }
+    if (reference.residency == Residency::Mapped) {
+        // A mapped object is a byte range inside the container's read-only file mapping, not a weight
+        // parent. Falling through to `host_parent` would report "no Host weight backing", which names
+        // the wrong storage and sends the reader looking for a copy that was never made.
+        throw ArtifactError(reference.name + ": a mapped object has no weight view");
+    }
     WeightView out;
     out.shape             = reference.shape;
     std::uint64_t covered = 0;

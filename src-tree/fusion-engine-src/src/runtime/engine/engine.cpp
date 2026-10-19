@@ -86,6 +86,35 @@ std::string context_capacity_error(std::size_t prompt_tokens, std::uint32_t max_
 
 } // namespace
 
+// Every frontend call has to name the active target's frontend, and `active` is a variant of one
+// pointer per target (`model_instance.h:101`), so each call site has to visit it. This is the
+// reference's own shape (`src/runtime/engine/engine.cpp:319-330`: a generic lambda, a null check,
+// then `target_ptr->loaded->frontend`). Ten of the call sites use `std::visit` directly, exactly as
+// the reference does; the three that sit in a variable declaration take theirs from here instead.
+[[nodiscard]] const models::qwen3_5::Frontend& active_frontend(const runtime::ActiveTarget& active) {
+    return std::visit(
+        [](const auto& target_ptr) -> const models::qwen3_5::Frontend& {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend;
+        },
+        active);
+}
+
+// The active target's Program. Only the fusion target has one: the ported family's Program is a
+// separate type reached through its own `FlashNextCore`, and the hybrid-cache block below is a
+// fusion-only feature (the reference has no hybrid alternative in its `Core` variant at all,
+// `engine.cpp:248-250`), so this returns null for the ported target and the block is skipped.
+[[nodiscard]] models::qwen3_5::Program* active_fusion_program(runtime::ActiveTarget& active) {
+    auto* instance = std::get_if<std::unique_ptr<runtime::ModelInstance>>(&active);
+    return instance != nullptr ? (*instance)->program.get() : nullptr;
+}
+
+[[nodiscard]] const models::qwen3_5::Program*
+active_fusion_program(const runtime::ActiveTarget& active) {
+    const auto* instance = std::get_if<std::unique_ptr<runtime::ModelInstance>>(&active);
+    return instance != nullptr ? (*instance)->program.get() : nullptr;
+}
+
 class PreparedPrompt::Impl {
 public:
     Impl(PromptSummary prompt_summary, PromptPreparationStats preparation, SamplingMode mode,
@@ -187,8 +216,16 @@ public:
         runtime::EngineCore<runtime::ModelInstance,
                             runtime::HybridResourceManager<runtime::ModelInstance::ModelContract>>;
     using ScoringCore = runtime::CausalScoreCore<runtime::ModelInstance>;
+    // The Flash-Next target gets its own `EngineCore` instantiation, because `EngineCore` reads
+    // `typename Instance::ModelContract` and the two families' runtime types are different classes
+    // (`docs/22 §4.23`). No scoring core: the reference has none for this target either
+    // (`src/runtime/engine/engine.cpp:278` falls through to `CoreFN` without testing
+    // `EnginePurpose::CausalScoring`). No hybrid core either, for the same reason -- the ported
+    // Program refuses the hybrid tier.
+    using FlashNextCore = runtime::EngineCore<runtime::FlashNextInstance>;
     using Core = std::variant<std::monostate, std::unique_ptr<GenerationCore>,
-                              std::unique_ptr<HybridGenerationCore>, std::unique_ptr<ScoringCore>>;
+                              std::unique_ptr<HybridGenerationCore>, std::unique_ptr<ScoringCore>,
+                              std::unique_ptr<FlashNextCore>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
@@ -207,11 +244,11 @@ public:
         // after planning, so the Engine adopts the resolved copy here — before the core that
         // sizes its admission capacity from it exists — and reports it through options().
         options             = std::move(constructed.options);
-        active            = std::move(constructed.instance);
+        active            = std::move(constructed.active);
         load              = std::move(constructed.load);
         load.cuda_sync_mode = device.sync_mode();
         model_metadata    = std::move(constructed.model_metadata);
-        sampling_defaults = active->frontend.sampling_defaults();
+        sampling_defaults = active_frontend(active).sampling_defaults();
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         const char* core_kind = "generation";
         if (options.purpose == EnginePurpose::CausalScoring) {
@@ -228,16 +265,32 @@ public:
         // the construction left the object half-built, as a bare access violation later. Fall back to
         // the plain generation core and keep serving, with the reason printed.
         try {
-            if (options.purpose == EnginePurpose::CausalScoring) {
-                core = std::make_unique<ScoringCore>(*active, device);
-            } else if (options.context_cache.enabled &&
-                       options.context_cache.mode == ContextCacheMode::Hybrid) {
-                core = std::make_unique<HybridGenerationCore>(*active, device, options,
-                                                              std::move(constructed.context_cost));
-            } else {
-                core = std::make_unique<GenerationCore>(*active, device, options,
-                                                        std::move(constructed.context_cost));
-            }
+            // Pick the core by the active target, exactly as the reference does
+            // (`src/runtime/engine/engine.cpp:262-283`, where Flash-Next is the final `else`).
+            // The ported target gets `FlashNextCore` and no scoring/hybrid alternative: its
+            // `Program` is a different type and it refuses the hybrid tier.
+            core = std::visit(
+                [&](auto& target_ptr) -> Core {
+                    using Instance =
+                        typename std::remove_reference_t<decltype(target_ptr)>::element_type;
+                    if constexpr (std::is_same_v<Instance, runtime::FlashNextInstance>) {
+                        return std::make_unique<FlashNextCore>(*target_ptr, device, options,
+                                                               std::move(constructed.context_cost));
+                    } else {
+                        if (options.purpose == EnginePurpose::CausalScoring) {
+                            return std::make_unique<ScoringCore>(*target_ptr, device);
+                        }
+                        if (options.context_cache.enabled &&
+                            options.context_cache.mode == ContextCacheMode::Hybrid) {
+                            return std::make_unique<HybridGenerationCore>(
+                                *target_ptr, device, options,
+                                std::move(constructed.context_cost));
+                        }
+                        return std::make_unique<GenerationCore>(*target_ptr, device, options,
+                                                                std::move(constructed.context_cost));
+                    }
+                },
+                active);
         } catch (const std::exception& error) {
             if (options.purpose == EnginePurpose::CausalScoring) { throw; }
             runtime::publish_diagnostic(
@@ -247,9 +300,16 @@ public:
                 "device pool will be refused; raise --kv-capacity to cover them.",
                 core_kind, error.what());
             try {
-                core = std::make_unique<GenerationCore>(*active, device, options,
-                                                        std::move(constructed.context_cost));
-                core_kind = "generation (fallback)";
+                if (const auto* fusion =
+                        std::get_if<std::unique_ptr<runtime::ModelInstance>>(&active)) {
+                    core = std::make_unique<GenerationCore>(**fusion, device, options,
+                                                            std::move(constructed.context_cost));
+                    core_kind = "generation (fallback)";
+                } else {
+                    // The ported target has no second core to fall back to; rethrow so the
+                    // failure is reported instead of leaving `core` as monostate.
+                    throw;
+                }
             } catch (const std::exception& fallback_error) {
                 runtime::publish_diagnostic(
                     options.diagnostic_observer, DiagnosticLevel::Error,
@@ -285,8 +345,10 @@ public:
 
     void report_prefix_cache_save() const noexcept {
         try {
+            const models::qwen3_5::Program* program = active_fusion_program(active);
+            if (program == nullptr) { return; } // Not a fusion target: nothing holds a host tier.
             const std::optional<models::qwen3_5::HybridCachePersistence> result =
-                active->program->hybrid_shutdown_save();
+                program->hybrid_shutdown_save();
             if (!result) {
                 runtime::publish_diagnostic(
                     options.diagnostic_observer, DiagnosticLevel::Warning,
@@ -313,7 +375,7 @@ public:
 
     EngineOptions options;
     DeviceContext device;
-    std::unique_ptr<runtime::ModelInstance> active;
+    runtime::ActiveTarget active;
     LoadSummary load;
     ModelMetadata model_metadata;
     ModelSamplingDefaults sampling_defaults;
@@ -334,16 +396,21 @@ Engine& Engine::operator=(Engine&&) noexcept = default;
 PreparedPrompt Engine::prepare(PromptInput input, const PreparationControl& control) const {
     nvtx::ScopedRange prepare_range(nvtx::Name::FrontendPrepare, nvtx::Category::Runtime);
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    auto prepared      = impl_->active->frontend.prepare(std::move(input), control);
-    PromptSummary info = prepared.summary();
-    const SamplingMode sampling_mode =
-        info.starts_in_reasoning ? SamplingMode::Thinking : SamplingMode::NonThinking;
-    if (info.prompt_tokens > impl_->active->capacity) {
-        throw std::logic_error("target Frontend admitted a prompt beyond Engine capacity");
-    }
-    const PromptPreparationStats preparation = prepared.preparation_stats();
-    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(info, preparation, sampling_mode,
-                                                                 std::move(prepared)));
+    return std::visit(
+        [&](const auto& target_ptr) -> PreparedPrompt {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            auto prepared      = target_ptr->loaded->frontend.prepare(std::move(input), control);
+            PromptSummary info = prepared.summary();
+            const SamplingMode sampling_mode =
+                info.starts_in_reasoning ? SamplingMode::Thinking : SamplingMode::NonThinking;
+            if (info.prompt_tokens > target_ptr->capacity) {
+                throw std::logic_error("target Frontend admitted a prompt beyond Engine capacity");
+            }
+            const PromptPreparationStats preparation = prepared.preparation_stats();
+            return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
+                info, preparation, sampling_mode, std::move(prepared)));
+        },
+        impl_->active);
 }
 
 PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
@@ -351,29 +418,44 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
     nvtx::ScopedRange prepare_range(nvtx::Name::FrontendPrepare, nvtx::Category::Runtime,
                                     static_cast<std::uint64_t>(token_ids.size()));
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    if (token_ids.size() > impl_->active->capacity) {
-        throw RequestError(RequestErrorKind::ContextLengthExceeded,
-                           context_capacity_error(token_ids.size(), impl_->active->capacity));
-    }
-    auto prepared =
-        impl_->active->frontend.prepare_tokens(std::move(token_ids), allow_prefix_identity);
-    PromptSummary info = prepared.summary();
-    if (info.prompt_tokens > impl_->active->capacity) {
-        throw std::logic_error("target Frontend admitted prompt tokens beyond capacity");
-    }
-    const PromptPreparationStats preparation = prepared.preparation_stats();
-    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
-        info, preparation, SamplingMode::Thinking, std::move(prepared)));
+    return std::visit(
+        [&](const auto& target_ptr) -> PreparedPrompt {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            if (token_ids.size() > target_ptr->capacity) {
+                throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                                   context_capacity_error(token_ids.size(), target_ptr->capacity));
+            }
+            auto prepared =
+                target_ptr->loaded->frontend.prepare_tokens(std::move(token_ids), allow_prefix_identity);
+            PromptSummary info = prepared.summary();
+            if (info.prompt_tokens > target_ptr->capacity) {
+                throw std::logic_error("target Frontend admitted prompt tokens beyond capacity");
+            }
+            const PromptPreparationStats preparation = prepared.preparation_stats();
+            return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
+                info, preparation, SamplingMode::Thinking, std::move(prepared)));
+        },
+        impl_->active);
 }
 
 std::vector<TokenId> Engine::tokenize_text(std::string_view text) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->active->frontend.tokenize_text(text);
+    return std::visit(
+        [&](const auto& target_ptr) {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend.tokenize_text(text);
+        },
+        impl_->active);
 }
 
 std::string Engine::token_bytes(TokenId token) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->active->frontend.token_bytes(token);
+    return std::visit(
+        [&](const auto& target_ptr) {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend.token_bytes(token);
+        },
+        impl_->active);
 }
 
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
@@ -409,7 +491,12 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
 
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->active->frontend.count_tokens(std::move(input), control);
+    return std::visit(
+        [&](const auto& target_ptr) {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend.count_tokens(std::move(input), control);
+        },
+        impl_->active);
 }
 
 ModelSamplingDefaults Engine::sampling_defaults() const {
@@ -526,7 +613,12 @@ MemorySummary Engine::memory_summary() const {
 
 MediaCacheSummary Engine::media_cache_summary() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->active->frontend.media_cache_summary();
+    return std::visit(
+        [&](const auto& target_ptr) {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend.media_cache_summary();
+        },
+        impl_->active);
 }
 
 RuntimeStats Engine::runtime_stats() const {

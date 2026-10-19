@@ -93,6 +93,13 @@ struct FileRecord {
     std::uint64_t logical_begin = 0;
 };
 
+struct ArtifactIdentity {
+    std::string model_id;
+    std::string weights_id;
+
+    bool operator==(const ArtifactIdentity&) const = default;
+};
+
 struct Directory {
     std::map<std::string, Component, std::less<>> components;
     std::vector<Object> objects;
@@ -101,8 +108,11 @@ struct Directory {
     std::map<std::pair<std::string, std::string>, Use> uses;
     std::vector<FileRecord> files;
     std::uint64_t payload_bytes = 0;
-    Json metadata               = Json::object();
-    Json provenance             = Json::object();
+    // The directory's top-level `identity` object. Upstream declares this type in its own
+    // `artifact/reader.h`; here the directory parser owns it, so it lives beside `Directory`.
+    ArtifactIdentity identity{};
+    Json metadata     = Json::object();
+    Json provenance   = Json::object();
 
     [[nodiscard]] const Object& object(ObjectHandle handle) const;
     [[nodiscard]] const TensorObject& tensor(ObjectHandle handle) const;

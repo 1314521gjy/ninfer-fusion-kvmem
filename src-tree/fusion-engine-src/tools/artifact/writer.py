@@ -119,6 +119,7 @@ class ArtifactWriter:
         uses: Sequence[dict] = (),
         metadata: dict | None = None,
         provenance: dict | None = None,
+        identity: dict | None = None,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     ) -> None:
         self.path = Path(path)
@@ -131,6 +132,9 @@ class ArtifactWriter:
             "uses": list(uses),
             "metadata": {} if metadata is None else metadata,
             "provenance": {} if provenance is None else provenance,
+            # Required by parse_directory (and by the engine's schema.cpp): a v3 directory that does
+            # not say what it is fails validation rather than loading unlabelled.
+            "identity": {} if identity is None else identity,
         }
         self.directory, encoded, self.payload_offset = layout_directory(
             self.path.name,

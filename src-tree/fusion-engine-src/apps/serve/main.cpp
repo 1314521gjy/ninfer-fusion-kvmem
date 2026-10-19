@@ -2,6 +2,7 @@
 #include "product/logging/engine_diagnostics.h"
 #include "product/logging/logging.h"
 #include "product/logging/startup_log.h"
+#include "product/speculative_options.h"
 #include "serve/operational_log.h"
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
@@ -179,6 +180,12 @@ int main(int argc, char** argv) {
         }
         ninfer::serve::GenerationService& service = *service_holder;
         startup_log.engine_ready(service.load_summary());
+        std::fprintf(stderr,
+                     "[spec] backend=%s draft_tokens=%u adaptive=%u attention_window=%u ngram=%u\n",
+                     ninfer::product::speculative_backend_name(options.speculative.backend), options.speculative.draft_tokens,
+                     options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive ? 1U : 0U,
+                     options.speculative.mtp_attention_window,
+                     options.speculative.ngram_draft_tokens);
         operational_log.engine_capacity(service);
 
         using Clock                            = std::chrono::steady_clock;

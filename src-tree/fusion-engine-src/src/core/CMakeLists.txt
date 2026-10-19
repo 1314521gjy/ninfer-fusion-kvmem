@@ -19,6 +19,9 @@ add_library(ninfer_core STATIC
   decode_graph.cpp
   evictable_kv_pool.cu
   evictable_weight_pool.cu
+  # Port-era addition left out of this list: `warm_readonly_host_memory`, called by the ported
+  # loader's `materialized.cpp`. Present in the tree, absent from every library -> link error only.
+  host_memory.cpp
 )
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)

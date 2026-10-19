@@ -1,4 +1,4 @@
-#include "serve/http_server.h"
+﻿#include "serve/http_server.h"
 
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
@@ -377,7 +377,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
 
         prepare_sse_response(res);
         res.set_chunked_content_provider(
-            "text/event-stream",
+            "text/event-stream; charset=utf-8",
             [this, stream, id, lifecycle](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
@@ -529,7 +529,7 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
             resolve_openai_responses_prompt(request, openai_responses_store_, std::nullopt, false);
         const int tokens = service_->count_prompt_tokens(
             resolved.generation, [&req] { return client_disconnected(req); });
-        res.set_content(make_openai_response_input_tokens_body(tokens), "application/json");
+        res.set_content(make_openai_response_input_tokens_body(tokens), "application/json; charset=utf-8");
     } catch (const ApiException& exception) {
         write_openai_error(res, responses_error(exception.error()));
     } catch (const std::exception& exception) {
@@ -553,7 +553,7 @@ void HttpServer::handle_response_get(const httplib::Request& req, httplib::Respo
         write_openai_error(res, response_not_found(id));
         return;
     }
-    res.set_content(stored->response.dump(), "application/json");
+    res.set_content(stored->response.dump(), "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Response& res) {
@@ -563,7 +563,7 @@ void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Re
         return;
     }
     res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
-                    "application/json");
+                    "application/json; charset=utf-8");
 }
 
 void HttpServer::handle_response_input_items(const httplib::Request& req, httplib::Response& res) {
@@ -574,7 +574,7 @@ void HttpServer::handle_response_input_items(const httplib::Request& req, httpli
         return;
     }
     try {
-        res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json");
+        res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json; charset=utf-8");
     } catch (const ApiException& exception) { write_openai_error(res, exception.error()); }
 }
 

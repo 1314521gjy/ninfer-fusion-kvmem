@@ -259,6 +259,13 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
 __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const SamplingConfig& c,
                                                          const std::int32_t* overlay = nullptr,
                                                          int overlay_len             = 0) {
+    // `allowed_tokens` is the upstream name for this bitset and has no column dimension: word v/32,
+    // bit v%32. `token_mask` + `token_mask_stride` is the column form this engine's speculative
+    // verification uses. They are the same machine words, so one branch reads either.
+    if (c.allowed_tokens != nullptr &&
+        (static_cast<unsigned int>(c.allowed_tokens[v / 32]) & (1U << (v % 32))) == 0) {
+        return -CUDART_INF_F;
+    }
     if (c.token_mask != nullptr &&
         (c.token_mask[overlay_len * c.token_mask_stride + v / 32] & (1U << (v % 32))) == 0) {
         return -CUDART_INF_F;

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "ninfer/ops/speculative_round.h"
 #include "core/pdl.cuh"
 
@@ -394,7 +394,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     const __nv_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
     const bool penalties =
-        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr;
+        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr || cfg.allowed_tokens != nullptr;
 
     if (!(cfg.temperature > 0.0f) && !penalties) {
         if (tid == 0) {
@@ -569,7 +569,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
     const SamplingConfig cfg = configs[row];
     const bool greedy        = !(cfg.temperature > 0.0f);
     const bool penalties =
-        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr;
+        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr || cfg.allowed_tokens != nullptr;
     if ((greedy && !penalties) || token_domain <= kSamplerTileItems) { return; }
     workspace = speculative_workspace_row(workspace, workspace_row_stride, row);
     if (partial == 0 && threadIdx.x == 0) {
@@ -654,7 +654,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     if (token_domain <= kSamplerTileItems) { return; }
     const bool greedy    = !(cfg.temperature > 0.0f);
     const bool penalties =
-        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr;
+        cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.token_mask != nullptr || cfg.allowed_tokens != nullptr;
 
     if (greedy && !penalties) {
         if constexpr (SparseProposal) {

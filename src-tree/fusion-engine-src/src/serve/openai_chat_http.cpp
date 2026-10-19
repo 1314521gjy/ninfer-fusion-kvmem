@@ -123,7 +123,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
 
         prepare_sse_response(res);
         res.set_chunked_content_provider(
-            "text/event-stream",
+            "text/event-stream; charset=utf-8",
             [this, stream, encoder, lifecycle, return_progress,
              timings_per_token](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {

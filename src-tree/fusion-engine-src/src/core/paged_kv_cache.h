@@ -10,13 +10,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace ninfer {
 
 inline constexpr std::int32_t kPagedKVPageSize = 64;
+
+// G3 (27B residency knife): the READ SET of one call exceeded the device slot pool. This is a
+// configuration/observability failure, NOT an allocation failure -- it must never be reported as
+// ContextCacheExhausted (a std::bad_alloc routed to the OOM path).
+class KVReadSetOverflow final : public std::runtime_error {
+public:
+    explicit KVReadSetOverflow(const std::string& what) : std::runtime_error(what) {}
+};
 
 /** Non-owning, single-sequence view consumed by growing-cache Ops. */
 struct PagedKVLayerView {
@@ -253,6 +263,14 @@ public:
     [[nodiscard]] std::uint32_t reserved_pages() const noexcept;
     [[nodiscard]] std::uint32_t lent_pages() const noexcept;
     [[nodiscard]] std::uint32_t available_pages() const noexcept;
+    // G3 counters (cheap, monotone, diagnostic only; a public mutable struct so callers and tests can
+    // read them without another accessor landing in a private section).
+    struct Counters {
+        std::uint64_t materialized = 0;  // successful materialize_one calls
+        std::uint64_t evicted      = 0;  // pages the eviction sink handed back
+        std::uint64_t exhausted    = 0;  // hard refusals after the sink could not free anything
+    };
+    Counters counters{};
     [[nodiscard]] std::size_t plane_count() const noexcept;
     [[nodiscard]] const Tensor& plane(std::size_t index) const;
     // Ranks the planes span (the highest plane rank plus one) and the rank holding plane `index`.
@@ -287,8 +305,12 @@ public:
                      std::vector<DeviceKVPageLease>& destination,
                      std::optional<DeviceKVPageHandle> preferred_predecessor = std::nullopt);
     // Single-page forms for fixed-capacity logical stores which do not own a growable lease vector.
+    // G2: when the pool has no free run, `evict` is asked to hand a page back (the 27B store demotes
+    // its oldest resident page to its host copy). An empty sink, or a sink that cannot free anything,
+    // leaves the original ContextCacheExhausted behaviour byte for byte.
     [[nodiscard]] DeviceKVPageLease materialize_one(DeviceKVPageReservation& reservation,
-                                                      const char* tag = "unspecified");
+                                                      const char* tag = "unspecified",
+                                                      const std::function<bool(const char*)>& evict = {});
     // Returns trailing leases to the same entitlement instead of releasing their capacity.
     void dematerialize(DeviceKVPageReservation& reservation, std::uint32_t target_page_count,
                        std::vector<DeviceKVPageLease>& source);

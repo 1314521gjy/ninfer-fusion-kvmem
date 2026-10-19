@@ -69,9 +69,29 @@ public:
 
     void include(ExecutionTiming timing) noexcept { timing_ += timing; }
 
+    // Move time already accumulated as Submit into the device-wait bucket. Ported from upstream
+    // (`runtime/contract/types.h`: `reclassify_submit_as_wait`). Targets whose blocking synchronise
+    // happens several call levels below the recorder cannot bracket it with begin_wait()/end_wait()
+    // without threading the recorder through; they measure the stall where it happens and
+    // reclassify it here. Without this the wait is indistinguishable from host work, because the
+    // Submit phase sweeps unattributed wall time into submit_host_ns.
+    //
+    // Deferred deliberately, exactly as upstream: when this is called the recorder is still inside
+    // the open Submit phase and nothing has been accumulated yet, so moving the time immediately
+    // would clamp against a zero submit_host_ns and silently do nothing. finish() applies it.
+    void reclassify_submit_as_wait(std::uint64_t ns) noexcept { pending_wait_ns_ += ns; }
+
     [[nodiscard]] ExecutionTiming finish() noexcept {
         if (finished_) { return timing_; }
         accumulate(Clock::now());
+        if (pending_wait_ns_ != 0) {
+            const std::uint64_t moved = pending_wait_ns_ < timing_.submit_host_ns
+                                            ? pending_wait_ns_
+                                            : timing_.submit_host_ns;
+            timing_.submit_host_ns -= moved;
+            timing_.device_wait_ns += moved;
+            pending_wait_ns_ = 0;
+        }
         range_.reset();
         phase_    = ExecutionTimingPhase::Paused;
         finished_ = true;
@@ -134,6 +154,8 @@ private:
     std::optional<nvtx::ScopedRange> range_;
     ExecutionTiming* abandoned_timing_ = nullptr;
     bool finished_                     = false;
+    // Wall time a target asked to move from Submit into the device-wait bucket; applied by finish().
+    std::uint64_t pending_wait_ns_ = 0;
 };
 
 } // namespace ninfer::runtime

@@ -524,6 +524,32 @@ public:
                page.source_pins != std::numeric_limits<std::uint32_t>::max();
     }
 
+    // G2 (27B residency knife): eviction sink used when the physical pool has no free page run.
+    // Demotes the OLDEST resident page that still has its authoritative HOST copy -- the
+    // "Never drop a replica that has no Host copy" invariant (context.cpp:1975-1995) is enforced
+    // HERE explicitly (host_replica required) and again by can_drop_device_replica. Oldest-first by
+    // content_epoch mirrors the ring's existing oldest-first policy (context.cpp:1946-1948); it is
+    // deliberately not CLOCK (that needs the reader's access pattern, which the 27B reader does not
+    // expose). Returns false when nothing can be demoted -> the core falls back to the original
+    // ContextCacheExhausted.
+    [[nodiscard]] bool demote_oldest_to_host() {
+        std::optional<std::size_t> victim;
+        std::uint64_t victim_epoch = 0;
+        for (std::size_t i = 0; i < pages_.size(); ++i) {
+            const Page& page = pages_[i];
+            if (!page.occupied || !page.device_replica || !page.host_replica) { continue; }
+            const LogicalKVPageHandle handle(this, static_cast<std::uint32_t>(i), page.generation);
+            if (!can_drop_device_replica(handle)) { continue; }
+            if (!victim.has_value() || page.content_epoch < victim_epoch) {
+                victim       = i;
+                victim_epoch = page.content_epoch;
+            }
+        }
+        if (!victim.has_value()) { return false; }
+        return drop_device_replica(LogicalKVPageHandle(this, static_cast<std::uint32_t>(*victim),
+                                                       pages_[*victim].generation));
+    }
+
     [[nodiscard]] DeviceKVPageHandle reserve_device_replica(LogicalKVPageHandle handle,
                                                             DeviceKVPageReservation& reservation) {
         Page& page = require(handle);
@@ -533,7 +559,12 @@ public:
             page.host_replica->committed_columns != page.committed_columns) {
             throw std::logic_error("logical KV Device restore is not reservable");
         }
-        page.pending_device_replica.emplace(physical_->materialize_one(reservation, "host-restore"));
+        // G2: the restore path is the one that runs out of device pages under a windowed pool, so it
+        // gets the eviction sink; logical-grow/transfer-destination keep the plain form (they are
+        // pool-growth / transfer-booking semantics, not "make room by demoting an old page").
+        page.pending_device_replica.emplace(physical_->materialize_one(
+            reservation, "host-restore",
+            [this](const char*) { return demote_oldest_to_host(); }));
         page.destination_pinned = true;
         return page.pending_device_replica->handle();
     }

@@ -48,6 +48,14 @@ void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAll
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
                         std::int32_t active_width, cudaStream_t stream);
 
+// Forward declaration for the per-stage hook parameter below; the definition lives in
+// chunked/launch.h. Upstream carries exactly this pair of lines at the same spot
+// (upstream src/ops/linear_attention/gated_delta_net/launch.h:51-53) -- the declaration must be
+// visible here even though the complete type is only needed by the definition.
+namespace chunked {
+struct GdnChunkedStageHook;
+}
+
 std::size_t chunked_workspace_bytes(std::int32_t value_heads, std::int32_t tokens);
 
 // FP16 recurrent-state storage around the FP32-interfaced chunked kernels.
@@ -57,6 +65,7 @@ void narrow_state_fp32_to_fp16(const Tensor& in, Tensor& out, cudaStream_t strea
 void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                     const Tensor& beta, float scale, const Tensor& ssm_state_in,
                     Tensor& ssm_state_out, Tensor& out, void* workspace,
-                    std::size_t workspace_bytes, cudaStream_t stream);
+                    std::size_t workspace_bytes, cudaStream_t stream,
+                    const chunked::GdnChunkedStageHook* hook = nullptr);
 
 } // namespace ninfer::ops::detail::gated_delta_net

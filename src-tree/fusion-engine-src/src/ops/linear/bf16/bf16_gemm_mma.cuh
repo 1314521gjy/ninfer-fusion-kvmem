@@ -65,7 +65,8 @@ struct Bf16MmaSchedule {
     static_assert(kBlockRows > 0 && kBlockCols > 0 && kBlockK > 0);
     static_assert(kBlockRows % kWarpRows == 0 && kBlockCols % kWarpCols == 0);
     static_assert(kWarpRows % 16 == 0 && kWarpCols % 8 == 0);
-    static_assert(kBlockK % 64 == 0);
+    static_assert(kBlockK % 16 == 0);
+    static_assert(kSwizzle == Bf16MmaSwizzle::Plain || (kBlockK % 64 == 0));
     static_assert(kPipelineStages >= 2 && kPipelineStages <= 8);
     static_assert(kMinBlocks >= 1);
     static_assert(kWarps >= 1 && kThreads <= 1024);
@@ -130,7 +131,7 @@ bf16_mma_tile_coordinates(std::int32_t linear, std::int32_t tiles_m, std::int32_
     }
 }
 
-template <class Geometry, class Schedule, bool FullTokens, class Output>
+template <class Geometry, class Schedule, bool FullTokens, class Output, int SplitK = 1>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16_gemm_mma_kernel(
     const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight, Output output,
     std::int32_t tokens) {
@@ -149,7 +150,8 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     constexpr int THREADS = Schedule::kThreads;
     static_assert(M % BM == 0);
     static_assert(K % BK == 0);
-    static_assert(K / BK >= S);
+    static_assert(SplitK >= 1 && ((K / BK) % SplitK) == 0);
+    static_assert((K / BK) / SplitK >= S);
 
     extern __shared__ __align__(16) unsigned char shared_raw[];
     auto* As = reinterpret_cast<__nv_bfloat16*>(shared_raw);
@@ -165,6 +167,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
 
     constexpr int tiles_m = M / BM;
     const int tiles_n     = tokens / BN + static_cast<int>(tokens % BN != 0);
+    const int split       = SplitK == 1 ? 0 : static_cast<int>(blockIdx.y);
     int tile_m            = 0;
     int tile_n            = 0;
     bf16_mma_tile_coordinates<Schedule>(static_cast<int>(blockIdx.x), tiles_m, tiles_n, tile_m,
@@ -181,9 +184,10 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     const int a_col_offset = (a_matrix >> 1) << 3;
     const int b_inner_row  = lane & 7;
     const int b_k_offset   = ((lane >> 3) & 1) << 3;
+    constexpr int kTiles   = (K / BK) / SplitK;
 
     auto stage_inputs = [&](int stage, int k_tile) {
-        const int k0  = k_tile * BK;
+        const int k0  = (split * kTiles + k_tile) * BK;
         auto* a_stage = As + stage * BM * BK;
         auto* b_stage = Bs + stage * BN * BK;
 
@@ -216,7 +220,6 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
         }
     };
 
-    constexpr int kTiles = K / BK;
 #pragma unroll
     for (int stage = 0; stage < S; ++stage) {
         stage_inputs(stage, stage);
@@ -235,7 +238,8 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
         }
         __syncthreads();
 
-        auto load_fragments = [&](int k_step, unsigned(&a_frag)[MT][4], unsigned(&b_frag)[NT][2]) {
+        auto load_fragments = [&](int k_step, unsigned (&a_frag)[MT][4],
+                                  unsigned (&b_frag)[NT][2]) {
 #pragma unroll
             for (int mi = 0; mi < MT; ++mi) {
                 const int row = wm * WM + mi * 16 + a_row_offset;

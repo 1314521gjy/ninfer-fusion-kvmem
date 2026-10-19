@@ -1763,6 +1763,22 @@ std::vector<std::uint32_t> ProgramImpl::select_retrieval_pages(const SequenceSta
                     for (const auto& entry : ranked) { selected.push_back(entry.second); }
                 }
                 std::sort(selected.begin(), selected.end());
+                if (const char* diag = std::getenv("NINFER_KV_DIAG_RESOLVE");
+                    diag != nullptr && diag[0] != (char)0 && diag[0] != '0') {
+                    static std::uint64_t select_ordinal = 0;
+                    const auto& diag_kept   = ops::detail::kvmem_score_selected_blocks();
+                    const auto& diag_scores = ops::detail::kvmem_score_host_scores();
+                    const std::int32_t diag_scored = ops::detail::kvmem_score_scored_blocks();
+                    double top = 0.0;
+                    for (const float value : diag_scores) { if (value > top) { top = value; } }
+                    std::fprintf(stderr,
+                                 "[diag] select-retrieve req=%llu evidence_max=%u scored=%d "
+                                 "kept=%zu need=%zu threshold=%.3f top_score=%.3f note=%s\n",
+                                 static_cast<unsigned long long>(++select_ordinal), budget,
+                                 static_cast<int>(diag_scored), diag_kept.size(),
+                                 static_cast<std::size_t>(end - begin), 0.0, top,
+                                 selected.empty() ? "below-threshold" : "ok");
+                }
                 return selected;
             }
         }
@@ -1817,6 +1833,20 @@ std::vector<std::uint32_t> ProgramImpl::select_retrieval_pages(const SequenceSta
     selected.reserve(scored.size());
     for (const auto& entry : scored) { selected.push_back(entry.second); }
     std::sort(selected.begin(), selected.end());
+    if (const char* diag = std::getenv("NINFER_KV_DIAG_RESOLVE");
+        diag != nullptr && diag[0] != (char)0 && diag[0] != '0') {
+        static std::uint64_t select_ordinal = 0;
+        const auto& diag_kept   = ops::detail::kvmem_score_selected_blocks();
+        const std::int32_t diag_scored = ops::detail::kvmem_score_scored_blocks();
+        std::fprintf(stderr,
+                     "[diag] select-retrieve req=%llu evidence_max=%u scored=%d kept=%zu "
+                     "need=%zu threshold=%.3f top_score=%.3f note=%s\n",
+                     static_cast<unsigned long long>(++select_ordinal), budget,
+                     static_cast<int>(diag_scored), diag_kept.size(),
+                     static_cast<std::size_t>(end - begin), 0.0,
+                     scored.empty() ? 0.0 : scored.front().first,
+                     selected.empty() ? "no-candidates" : "idf-fallback");
+    }
     return selected;
 }
 
@@ -1932,6 +1962,15 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
     return freed;
 }
 
+// Forward declarations for the ring prototype helpers defined later in this TU: demote_kv_pages_to_host
+// (below) needs the protect window when it decides where eviction may start.
+namespace {
+bool proto_kv_protect_enabled();
+bool proto_kv_protect_rescue();
+std::uint32_t proto_kv_protect_pages(std::uint32_t window_pages);
+std::uint32_t proto_kv_window_pages();
+} // namespace
+
 std::uint32_t ProgramImpl::demote_kv_pages_to_host(KVAddressSpaceStore& addresses,
                                                    LogicalKVPageStore& pages,
                                                    const KVAddressSpaceHandle& address,
@@ -1946,8 +1985,20 @@ std::uint32_t ProgramImpl::demote_kv_pages_to_host(KVAddressSpaceStore& addresse
     // Oldest first, skipping the attention sink and (in the first pass) the pages retrieval wants to
     // keep. If that is not enough the second pass gives up the retrieved pages too, so the caller is
     // guaranteed to get the room it asked for whenever the Device can supply it at all.
+    // NINFER_KV_RECENT_PAGES: the newest pages are protected in BOTH passes, like the attention
+    // sink -- they carry what the model just generated. 0 (default) restores today exactly.
+    const std::uint32_t recent_protected = [] {
+        const char* text = std::getenv("NINFER_KV_RECENT_PAGES");
+        if (text == nullptr || text[0] == (char)0) { return 0U; }
+        char* end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        return (end != text && *end == (char)0 && value > 0) ? static_cast<std::uint32_t>(value) : 0U;
+    }();
     std::uint32_t demoted   = 0;
-    std::uint32_t page      = sink_pages;
+    const std::uint32_t protect_floor =
+        proto_kv_protect_enabled() ? std::max(sink_pages, proto_kv_protect_pages(proto_kv_window_pages()))
+                                   : sink_pages;
+    std::uint32_t page      = protect_floor;
     bool second_pass        = false;
     while (demoted < target_free) {
         if (page >= mapped) {
@@ -1960,6 +2011,7 @@ std::uint32_t ProgramImpl::demote_kv_pages_to_host(KVAddressSpaceStore& addresse
         const LogicalKVPageHandle logical = addresses.logical_page(address, current);
         ++page;
         if (!second_pass && is_preferred(current)) { continue; }
+        if (recent_protected != 0U && current + recent_protected >= mapped) { continue; }
         if (!pages.valid(logical) || !pages.device_resident(logical) ||
             pages.source_pins(logical) != 0) {
             continue;
@@ -2024,6 +2076,52 @@ std::uint32_t proto_kv_window_pages() {
     return pages;
 }
 
+// NINFER_KV_PROTECT (default OFF): pages that must never be evicted by the ring -- the attention sink,
+// optionally media pages, and the newest user turn. The cap is a fraction of the window and is HARD:
+// a request that cannot respect it fails loudly instead of silently degrading (zhou: protecting the
+// whole window cost 9% decode).
+bool proto_kv_protect_enabled() {
+    static const bool enabled = [] {
+        const char* text = std::getenv("NINFER_KV_PROTECT");
+        return text != nullptr && text[0] != (char)0 && std::strtol(text, nullptr, 10) > 0;
+    }();
+    return enabled;
+}
+
+std::uint32_t proto_kv_protect_frac() {
+    static const std::uint32_t frac = [] {
+        const char* text = std::getenv("NINFER_KV_PROTECT_FRAC");
+        if (text == nullptr || text[0] == (char)0) { return 15U; }
+        char* end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (end == text || *end != (char)0 || value < 1 || value > 50) {
+            throw std::invalid_argument(
+                "NINFER_KV_PROTECT_FRAC must be an integer in [1,50] (percent of the window)");
+        }
+        return static_cast<std::uint32_t>(value);
+    }();
+    return frac;
+}
+
+bool proto_kv_protect_rescue() {
+    static const bool rescue = [] {
+        const char* text = std::getenv("NINFER_KV_PROTECT_RESCUE");
+        if (text == nullptr || text[0] == (char)0) { return true; }
+        const long value = std::strtol(text, nullptr, 10);
+        return value != 0;
+    }();
+    return rescue;
+}
+
+// protect_pages = min(floor(window_pages * frac/100), window_pages), never below the attention sink.
+std::uint32_t proto_kv_protect_pages(std::uint32_t window_pages) {
+    if (!proto_kv_protect_enabled() || window_pages == 0) { return 0U; }
+    // Cap is a fraction of the WINDOW, not of the pool: protecting the whole window cost zhou 9% decode.
+    const std::uint32_t cap =
+        static_cast<std::uint32_t>((static_cast<std::uint64_t>(window_pages) *
+                                    proto_kv_protect_frac()) / 100U);
+    return cap == 0 ? 1U : cap;
+}
 std::uint32_t proto_pages_for_tokens(std::uint32_t tokens) {
     if (tokens == 0) { return 0; }
     return (tokens + static_cast<std::uint32_t>(kPagedKVPageSize) - 1U) /
@@ -2324,6 +2422,11 @@ void ProgramImpl::ensure_ring_room(KVAddressSpaceStore& addresses, LogicalKVPage
     // Keep a few pages of slack so the pool never runs at exactly 100%: the restore path always
     // needs a free Device page to work with.
     constexpr std::uint32_t kRingSlackPages = 8U;
+    // ROLLED BACK (2026-10-19): an absolute `free < 10` refusal was tried here and rejected by
+    // measurement -- a short-output request on a 32-page pool legitimately runs with free=8, so the
+    // rule killed healthy arms (V1'/V3') and polluted the Bug B measurements. The real criterion is
+    // "the request's output budget vs how many pages `free` can carry" (max_tokens > free * 64),
+    // which needs the request's max_tokens and is NOT implemented here.
     const auto free_pages                   = [](const LogicalKVPageStore& store) {
         const std::uint32_t usable    = store.physical_pool().usable_pages();
         const std::uint32_t allocated = store.physical_pool().allocated_pages();
@@ -2402,6 +2505,33 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
     // range, ensure_ring_room computes need = total - mapped, beat 3 maps into the entitlement it
     // sized).
     ensure_sequence_kv_lease(sequence, main_tokens, backend_tokens);
+    // NEW-REQUEST RESET (Bug B) now lives in release_sequence_kv(): that is the one place every
+    // admit / Root-reuse / lane-recycle path passes through, so the retrieval set (ring_keep /
+    // ring_scored_mapped) can never leak from one question into the next.
+    // DIAGNOSTIC ONLY (NINFER_KV_DIAG_RESET=1, first 8 beats): observe the prefill state that used to
+    // gate the reset, so a future change can be attributed to real values instead of guesses.
+    if (const char* reset_diag = std::getenv("NINFER_KV_DIAG_RESET");
+        reset_diag != nullptr && reset_diag[0] != (char)0 && reset_diag[0] != '0') {
+        static std::uint32_t reset_probe_printed = 0;
+        if (reset_probe_printed < 8U) {
+            ++reset_probe_printed;
+            const std::uint32_t probe_lane = sequence.lane;
+            std::fprintf(stderr,
+                         "[diag] reset-probe n=%u lane=%u lifecycle=%d has_prefill=%d cursor=%d "
+                         "ring_keep=%zu ring_scored_mapped=%u\n",
+                         reset_probe_printed, probe_lane,
+                         probe_lane < requests.size()
+                             ? static_cast<int>(requests[probe_lane].lifecycle)
+                             : -1,
+                         probe_lane < requests.size() && requests[probe_lane].prefill ? 1 : 0,
+                         probe_lane < requests.size() && requests[probe_lane].prefill
+                             ? static_cast<int>(requests[probe_lane].prefill->cursor)
+                             : -1,
+                         sequence.ring_keep.size(), sequence.ring_scored_mapped);
+        }
+    }
+    // (The old `cursor == 0` reset attempt was removed: a prefix-hit request starts prefill at the
+    // reused frontier, so that condition never fired. The reset is in release_sequence_kv().)
     // LOCAL PROTOTYPE (KVMem-style ring): when a Device pool is smaller than the logical context a
     // sequence cannot keep all of its KV on the Device. Each call then:
     //   1. ranks the pages by relevance to the recent context (retrieval preference),
@@ -2420,15 +2550,100 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
     const bool ring = window_pages != 0 && text_kv_pages != nullptr && text_kv_addresses != nullptr &&
                       text_kv_pages->physical_pool().usable_pages() <
                           text_kv_addresses->logical_page_capacity();
+    // NINFER_KV_DIAG_RESOLVE: read-only probes. OFF (unset/empty/0) returns before formatting.
+    const bool diag_resolve = [] {
+        const char* text = std::getenv("NINFER_KV_DIAG_RESOLVE");
+        return text != nullptr && text[0] != (char)0 && std::strtol(text, nullptr, 10) > 0;
+    }();
+    static std::uint32_t diag_resolve_ordinal = 0;
     std::vector<std::uint32_t> preferred;
+    // NINFER_KV_PREFILL_NO_RESTORE (default OFF, byte-for-byte unchanged when unset/0): during PREFILL
+    // the retrieval window is not needed yet, so the per-chunk H2D restore of the preferred (evidence)
+    // pages is pure cost -- measured: ~280 s of one 250K prefill is this H2D. Only the evidence restore
+    // is skipped; mapping (ensure_mapped_to_tokens), the sink, and the host write-through are untouched.
+    const auto prefill_no_restore_on = [] {
+        const char* text = std::getenv("NINFER_KV_PREFILL_NO_RESTORE");
+        return text != nullptr && text[0] != (char)0 && std::strtol(text, nullptr, 10) > 0;
+    }();
+    bool prefill_phase = false;
+    if (prefill_no_restore_on && ring) {
+        const std::uint32_t phase_lane = sequence.lane;
+        if (phase_lane < requests.size()) {
+            prefill_phase = requests[phase_lane].lifecycle == Lifecycle::Prefilling;
+        }
+    }
     if (ring) {
         // Retrieval preference: a share of the pool (default half -- see the LOCAL FIX comment on
         // proto_kv_retrieve_share_percent), scored on the whole mapped range.
         // Scoring runs only when the mapped page count changed (relevance shifts slowly; within one
         // page the previous selection stays valid). Between rescores the hysteresis set is reused.
         const std::uint32_t pool   = text_kv_pages->physical_pool().usable_pages();
-        const std::uint32_t share  = pool * proto_kv_retrieve_share_percent() / 100U;
-        std::uint32_t budget       = std::min(proto_kv_retrieve_pages(), share);        // ---- B32 (2026-10-07): the retrieval budget had NO default. ---------------------------------
+        // NINFER_KV_EVIDENCE_SHARE (integer 0..90): overrides the retrieval share of the pool.
+        // Unset / empty / non-numeric => proto_kv_retrieve_share_percent() exactly as before, so the
+        // default path stays byte-for-byte identical (no extra log line either).
+        std::uint32_t share_percent = proto_kv_retrieve_share_percent();
+        bool share_from_env = false;
+        if (const char* share_text = std::getenv("NINFER_KV_EVIDENCE_SHARE");
+            share_text != nullptr && share_text[0] != '\0') {
+            char* share_end = nullptr;
+            const long share_value = std::strtol(share_text, &share_end, 10);
+            if (share_end != share_text && *share_end == '\0' && share_value >= 0) {
+                share_percent = static_cast<std::uint32_t>(std::min<long>(share_value, 90L));
+                share_from_env = true;
+            }
+        }
+        const std::uint32_t share  = pool * share_percent / 100U;
+        std::uint32_t budget       = std::min(proto_kv_retrieve_pages(), share);
+        // NINFER_KV_EVIDENCE_AUTO (default OFF, byte-for-byte unchanged when unset/0): give the pool's
+        // IDLE pages to retrieval instead of the fixed 50% share. The reserve keeps the long-output
+        // safety line free (measured: >= 10 free pages), and skeleton is never touched. This only
+        // hands over pages that are already free; it does not make a global-count question answerable
+        // with less than the whole context on Device.
+        {
+            const auto evidence_auto_on = [] {
+                const char* text = std::getenv("NINFER_KV_EVIDENCE_AUTO");
+                return text != nullptr && text[0] != (char)0 && std::strtol(text, nullptr, 10) > 0;
+            }();
+            if (evidence_auto_on) {
+                std::uint32_t reserve = 10U;   // long-output safety line (measured)
+                if (const char* reserve_text = std::getenv("NINFER_KV_EVIDENCE_RESERVE");
+                    reserve_text != nullptr && reserve_text[0] != (char)0) {
+                    char* reserve_end = nullptr;
+                    const long reserve_value = std::strtol(reserve_text, &reserve_end, 10);
+                    if (reserve_end != reserve_text && *reserve_end == (char)0 && reserve_value >= 1) {
+                        reserve = static_cast<std::uint32_t>(reserve_value);
+                    }
+                }
+                const std::uint32_t used = sink_pages + reserve;
+                const std::uint32_t auto_budget =
+                    pool > used ? pool - used : 1U;
+                const std::uint32_t retrieve_pages = proto_kv_retrieve_pages();
+                budget = std::min(retrieve_pages, auto_budget);
+                std::fprintf(stderr,
+                             "[ninfer] evidence auto: pool=%u skeleton=%u evidence=%u reserve=%u "
+                             "free=%u kv_retrieve_pages=%u\n",
+                             pool, sink_pages, budget, reserve,
+                             pool > sink_pages + budget ? pool - sink_pages - budget : 0U,
+                             retrieve_pages);
+            }
+        }
+        // HARD INVARIANT: evidence must leave at least one page free (a restore needs a free slot) and
+        // the [ring] budgets row must still sum to the pool. Clamp instead of failing.
+        {
+            const std::uint32_t evidence_cap = pool > sink_pages + 1U ? pool - sink_pages - 1U : 0U;
+            if (budget > evidence_cap) {
+                if (share_from_env) {
+                    std::fprintf(stderr,
+                                 "[ninfer] evidence share clamped: requested=%u%% applied=%u%% "
+                                 "evidence_pages=%u\n",
+                                 share_percent,
+                                 static_cast<unsigned>(pool == 0U ? 0U
+                                                                 : (evidence_cap * 100U) / pool),
+                                 evidence_cap);
+                }
+                budget = evidence_cap;
+            }
+        }        // ---- B32 (2026-10-07): the retrieval budget had NO default. ---------------------------------
         // WHY THIS EXISTS: proto_env_pages returns 0 when NINFER_KV_RETRIEVE is unset, and NOTHING in
         // this tree sets it (no launcher, script or doc), so the shipped default is budget = 0: the
         // ring demotes pages and never brings any back. Measured on this build (2026-10-07): such a
@@ -2474,22 +2689,143 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         // pool, one of the terms was redefined without updating the others.
         // Logged once per request (the ring path is per-request), not per chunk, to avoid flooding.
         {
-            const std::uint32_t b_skeleton = sink_pages < pool ? sink_pages : pool;
-            const std::uint32_t b_evidence = budget < pool - b_skeleton ? budget : pool - b_skeleton;
-            const std::uint32_t b_recent   = 0U;   // recency is whatever the request's own frontier maps
-            const std::uint32_t b_free     = pool - b_skeleton - b_evidence - b_recent;
+            // PROTECT (env-gated): the bucket is taken OUT of the pool FIRST, then the remainder is
+            // split four ways. The cap is a fraction of the WINDOW (not the pool): protecting the whole
+            // window cost zhou 9% decode. Sink is part of the bucket, so skeleton stays 0 when on.
+            const std::uint32_t protect_window_pages = proto_kv_window_pages();
+            const std::uint32_t protect_cap_pages =
+                proto_kv_protect_enabled() ? proto_kv_protect_pages(protect_window_pages) : 0U;
+            // The HEAD segment takes the full cap; the sink is a SUBSET that is always included, never an
+            // upper bound. min(sink, cap) was wrong: it could only shrink protect to the sink (4 pages)
+            // and the head segment (the fact at page 20) was never protected.
+            const std::uint32_t protect_desired = protect_cap_pages;
+            const std::uint32_t protect_mapped_now =
+                text_kv_addresses->mapped_pages(sequence.kv->text);
+            const std::uint32_t b_protect =
+                protect_cap_pages == 0U
+                    ? 0U
+                    : std::min({protect_cap_pages, protect_mapped_now, pool});
+            const bool protect_clamped = b_protect < protect_desired;
+            const std::uint32_t protect_head_pages =
+                b_protect > (sink_pages < b_protect ? sink_pages : b_protect)
+                    ? b_protect - (sink_pages < b_protect ? sink_pages : b_protect)
+                    : 0U;
+            if (b_protect > pool) {
+                throw std::runtime_error(
+                    "KV protect window is outside the device pool: protect_pages=" +
+                    std::to_string(b_protect) + " pool_pages=" + std::to_string(pool));
+            }
+            const std::uint32_t pool_after_protect = pool - b_protect;
+            if (b_protect != 0U) {
+                std::fprintf(stderr,
+                             "[ring] protect: pinned_tokens=%u pinned_pages=%u head_room_pages=%u "
+                             "keep_pages=%u cap_pages=%u head_pages=%u clamped=%d\n",
+                             b_protect * static_cast<std::uint32_t>(kPagedKVPageSize), b_protect,
+                             pool - b_protect, b_protect, protect_cap_pages, protect_head_pages,
+                             protect_clamped ? 1 : 0);
+            }
+            const std::uint32_t b_skeleton = 0U;   // sink is folded into protect when protect is on
+            // (A) MTP backend KV allocates from the SAME device pool, so the text ring must not book
+            // the last pages: reserve the backend's resident pages in the budget. The backend address
+            // can mirror up to the whole context (planning/request_plan.cpp: backend_kv_page_entitlement
+            // = kv_pages_for_tokens(prompt + draft_window - 1) => thousands of pages), so the
+            // reservation is CAPPED. The cap follows what the drafter can ADDRESS:
+            //   bounded draft attention (--mtp-attention-window W > 0): only W keys + the sink are
+            //   addressable  => ceil((W + sink_tokens)/64) + 2 pages  (W=8, sink 256 => 7 pages);
+            //   full-history draft (W == 0): keep the conservative half-pool bound.
+            // sink_tokens comes from proto_kv_sink_pages() (NINFER_KV_SINK, default 4 pages = 256
+            // tokens; storage/context.cpp:2101-2112), never from a literal.
+            const std::uint32_t backend_reserved_raw =
+                has_backend ? backend_kv_addresses->mapped_pages(*sequence.kv->backend) : 0U;
+            const std::uint32_t sink_tokens =
+                sink_pages * static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t backend_cap =
+                !has_backend ? 0U
+                            : (mtp_attention_window > 0U
+                                   ? ((mtp_attention_window + sink_tokens + 63U) / 64U) + 2U
+                                   : std::max<std::uint32_t>(8U, pool / 2U));
+            const std::uint32_t b_backend = std::min(backend_reserved_raw, backend_cap);
+            const bool backend_capped = backend_reserved_raw > backend_cap;
+            const std::uint32_t pool_after_backend =
+                pool_after_protect > b_backend ? pool_after_protect - b_backend : 0U;
+            const std::uint32_t b_evidence =
+                budget < (pool_after_backend > 1U ? pool_after_backend - 1U : 0U)
+                    ? budget
+                    : (pool_after_backend > 1U ? pool_after_backend - 1U : 0U);
+            // NINFER_KV_RECENT_PAGES (integer, default 0 = today byte for byte): protected budget for
+            // the newest pages, taken AFTER skeleton and evidence, always leaving >= 1 page free so
+            // skeleton + evidence + recent + free == pool still holds by construction.
+            std::uint32_t b_recent = 0U;
+            std::uint32_t recent_requested = 0U;
+            if (const char* recent_text = std::getenv("NINFER_KV_RECENT_PAGES");
+                recent_text != nullptr && recent_text[0] != (char)0) {
+                char* recent_end = nullptr;
+                const long recent_value = std::strtol(recent_text, &recent_end, 10);
+                if (recent_end != recent_text && *recent_end == (char)0 && recent_value > 0) {
+                    recent_requested = static_cast<std::uint32_t>(recent_value);
+                }
+            }
+            if (recent_requested != 0U) {
+                const std::uint32_t used = b_skeleton + b_evidence;
+                const std::uint32_t room = pool > used + 1U ? pool - used - 1U : 0U;
+                b_recent = recent_requested < room ? recent_requested : room;
+                if (b_recent != recent_requested) {
+                    std::fprintf(stderr, "[ninfer] recent pages clamped: requested=%u applied=%u\n",
+                                 recent_requested, b_recent);
+                }
+            }
+            const std::uint32_t b_free     = pool - b_protect - b_skeleton - b_evidence - b_recent - b_backend;
+            {
+                // The sum check must read the pool from the POOL, not recompute it from the very
+                // terms being checked: `b_free = pool - ...` makes an algebraic check tautological and
+                // the optimizer deletes it outright (measured: the throw vanished from the object).
+                const std::uint32_t pool_seen_now = text_kv_pages->physical_pool().usable_pages();
+                const std::uint32_t ring_budget_sum =
+                    b_protect + b_skeleton + b_evidence + b_recent + b_backend + b_free;
+                if (ring_budget_sum != pool_seen_now || b_protect > pool_seen_now) {
+                    throw std::runtime_error(
+                        "ring budget invariant violated: protect=" + std::to_string(b_protect) +
+                        " skeleton=" + std::to_string(b_skeleton) + " evidence=" +
+                        std::to_string(b_evidence) + " recent=" + std::to_string(b_recent) +
+                        " free=" + std::to_string(b_free) + " backend=" + std::to_string(b_backend) +
+                        " pool=" + std::to_string(pool_seen_now));
+                }
+            }
             std::fprintf(stderr,
-                         "[ring] budgets: skeleton=%u, evidence=%u, recent=%u, free=%u (pool %u) "
-                         "[skeleton+evidence+recent+free == pool: %s]\n",
-                         b_skeleton, b_evidence, b_recent, b_free, pool,
-                         (b_skeleton + b_evidence + b_recent + b_free) == pool ? "yes" : "NO");
+                         "[ring] budgets: protect=%u skeleton=%u, evidence=%u, recent=%u, free=%u (pool %u) "
+                         "backend_pages=%u backend_capped=%d "
+                         "[protect+skeleton+evidence+recent+backend+free == pool: %s]\n",
+                         b_protect, b_skeleton, b_evidence, b_recent, b_free, pool,
+                         b_backend, backend_capped ? 1 : 0,
+                         static_cast<unsigned>(b_protect + b_skeleton + b_evidence + b_recent + b_backend + b_free) == pool ? "yes\n" : "NO\n");
         }
         const std::uint32_t mapped_now = text_kv_addresses->mapped_pages(sequence.kv->text);
+        // DIAGNOSTIC ONLY (NINFER_KV_DIAG_RESET=1, first 8 beats): which branch retrieval takes.
+        if (const char* retrieve_diag = std::getenv("NINFER_KV_DIAG_RESET");
+            retrieve_diag != nullptr && retrieve_diag[0] != (char)0 &&
+            retrieve_diag[0] != '0') {
+            static std::uint32_t retrieve_probe_printed = 0;
+            if (retrieve_probe_printed < 8U) {
+                ++retrieve_probe_printed;
+                const bool would_recompute =
+                    (mapped_now != sequence.ring_scored_mapped || sequence.ring_keep.empty());
+                std::fprintf(stderr,
+                             "[diag] retrieve-probe req=%llu mapped_now=%u scored_mapped=%u "
+                             "recompute=%d keep=%zu preferred=%zu\n",
+                             static_cast<unsigned long long>(retrieve_probe_printed), mapped_now,
+                             sequence.ring_scored_mapped, would_recompute ? 1 : 0,
+                             sequence.ring_keep.size(), preferred.size());
+            }
+        }
         if (budget != 0 && mapped_now > sink_pages &&
             (mapped_now != sequence.ring_scored_mapped || sequence.ring_keep.empty())) {
             preferred = select_retrieval_pages(sequence, sink_pages, mapped_now, budget);
             sequence.ring_keep          = preferred;
             sequence.ring_scored_mapped = mapped_now;
+            static std::uint64_t ring_preferred_ordinal = 0;
+            std::fprintf(stderr, "[ring] retrieve preferred req=%llu n=%u\n",
+                         static_cast<unsigned long long>(++ring_preferred_ordinal),
+                         static_cast<unsigned>(preferred.size()));
         } else if (mapped_now == sequence.ring_scored_mapped) {
             preferred = sequence.ring_keep;
         } else {
@@ -2506,6 +2842,29 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         // B01: room is made by the shared helper, which every mapping site now uses. It takes the
         // token frontier (proto_pages_for_tokens converts) and decides right here -- with these exact
         // numbers -- whether the pages this step must map can be freed at all.
+        if (diag_resolve) {
+            ++diag_resolve_ordinal;
+            std::fprintf(stderr, "[diag] preferred-list req=%u n=%zu ids=[", diag_resolve_ordinal,
+                         preferred.size());
+            const std::size_t shown = preferred.size() < 8U ? preferred.size() : 8U;
+            for (std::size_t i = 0; i < shown; ++i) {
+                std::fprintf(stderr, "%s%u", i == 0 ? "" : ",", preferred[i]);
+            }
+            std::fprintf(stderr, "]\n");
+        }
+        if (prefill_phase) {
+            // No retrieval during prefill: clear the preference so ensure_ring_room does not reserve
+            // room for pages we will not pull, and so the restore call below sees an empty set.
+            static std::uint32_t reported_lanes = 0;
+            const std::uint32_t report_lane = sequence.lane;
+            if (report_lane < 32U && (reported_lanes & (1U << report_lane)) == 0U) {
+                reported_lanes |= (1U << report_lane);
+                std::fprintf(stderr,
+                             "[ring] prefill-no-restore: lane=%u skipped_evidence_pages=%zu pool=%u\n",
+                             report_lane, preferred.size(), pool);
+            }
+            preferred.clear();
+        }
         ensure_ring_room(*text_kv_addresses, *text_kv_pages, sequence.kv->text, main_tokens,
                          preferred);
         if (has_backend) {
@@ -2519,8 +2878,22 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
                                                       device.stream);
     }
     if (ring) {
+        // ROLLED BACK (2026-10-19, DSH "active KV snapshot page ownership is not ordered"): a
+        // via=demote experiment used to demote the selected evidence pages here so that a Host
+        // replica existed before the restore. Demotion changes writer/ownership state and breaks the
+        // shared-prefix snapshot invariant (kv_store.h:1515-1553); it also never delivered the
+        // expected win. The ring leaves the evidence pages alone again: no demote, no publish.
         const std::vector<std::uint32_t> restored = restore_kv_pages_from_host(
             *text_kv_addresses, *text_kv_pages, sequence.kv->text, preferred);
+        if (diag_resolve) {
+            const std::uint32_t first_page = preferred.empty() ? 0U : preferred.front();
+            const std::uint32_t last_page  = preferred.empty() ? 0U : preferred.back();
+            std::fprintf(stderr,
+                         "[diag] resolve-detail req=%u pages=%zu first_page=%u last_page=%u "
+                         "tokens=[%u..%u] preferred=%zu restored=%zu\n",
+                         diag_resolve_ordinal, preferred.size(), first_page, last_page,
+                         first_page * 64U, last_page * 64U + 63U, preferred.size(), restored.size());
+        }
         // LOCAL DIAGNOSTIC (ring retrieve): `preferred` vs `restored` separates three different
         // worlds that used to look identical from the outside --
         //   restored == preferred   -> every wanted page is Device-resident now
@@ -2557,6 +2930,70 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         }
         // The mask IS the resident set, so a page that could not be demoted or restored can only be
         // hidden; it can never expose a stale Device slot.
+        // PROTECT rescue (NINFER_KV_PROTECT=1 + NINFER_KV_PROTECT_RESCUE=1): bring back ONLY the
+        // protected pages this round dropped; pages retrieval kept cost nothing here. Reuses the
+        // existing host-restore path (restore_kv_pages_from_host) -- no new state machine.
+        if (proto_kv_protect_enabled() && proto_kv_protect_rescue()) {
+            const std::uint32_t protect_pool = text_kv_pages->physical_pool().usable_pages();
+            const std::uint32_t protect_window = proto_kv_window_pages();
+            const std::uint32_t protect_cap = proto_kv_protect_pages(protect_window);
+            // TWO SEPARATE LEDGERS: the pool page budget (above) and the ADDRESS-SPACE capacity
+            // (address.page_count = pages mapped so far). Protect may only touch pages inside the
+            // address space; during warmup that can still be 0, which is where the ring crashed with
+            // "KV logical page is outside the address space".
+            const std::uint32_t protect_addr_capacity =
+                text_kv_addresses->mapped_pages(sequence.kv->text);
+            // `allowed` is recomputed on EVERY rescue call (never cached): during warmup mapped_pages is 0,
+            // so a cached value would silently disable protect for the rest of the session.
+            const std::uint32_t protect_pages_allowed =
+                std::min({protect_cap, protect_pool, protect_addr_capacity});
+            if (const char* protect_dbg = std::getenv("NINFER_KV_PROTECT_DBG");
+                protect_dbg != nullptr && protect_dbg[0] != (char)0 && protect_dbg[0] != '0') {
+                static std::uint32_t protect_dbg_printed = 0;
+                if (protect_dbg_printed < 4U) {
+                    ++protect_dbg_printed;
+                    std::fprintf(stderr,
+                                 "[diag] protect-dbg phase=%s lane=%u addr_capacity_pages=%u "
+                                 "pool_pages=%u window_pages=%u protect_pages=%u allowed=%u clamp_cap=%u\n",
+                                 requests[sequence.lane].lifecycle == Lifecycle::Prefilling ? "prefill"
+                                                                                             : "decode",
+                                 sequence.lane, protect_addr_capacity, protect_pool, protect_window,
+                                 protect_cap, protect_pages_allowed, protect_cap);
+                }
+            }
+            if (protect_pages_allowed > protect_pool) {
+                throw std::runtime_error(
+                    "KV protect window is outside the device pool: protect_pages=" +
+                    std::to_string(protect_pages_allowed) + " pool_pages=" + std::to_string(protect_pool));
+            }
+            std::uint32_t rescued = 0;
+            for (std::uint32_t page = 0; page < protect_pages_allowed && rescued < protect_pages_allowed; ++page) {
+                // Per-page re-validation: `allowed` was computed for THIS call, but the ring can shrink
+                // the address space between calls, so never trust the loop bound alone. Out of range is
+                // still a hard throw (a loud error is safer than a silent no-op protect).
+                const std::uint32_t protect_mapped_now =
+                    text_kv_addresses->mapped_pages(sequence.kv->text);
+                if (page >= protect_mapped_now) {
+                    throw std::runtime_error(
+                        "KV protect rescue page is outside the address space: page=" +
+                        std::to_string(page) + " protect_pages=" +
+                        std::to_string(protect_pages_allowed) + " pool_pages=" +
+                        std::to_string(protect_pool) + " mapped_pages=" +
+                        std::to_string(protect_mapped_now));
+                }
+                const LogicalKVPageHandle logical = text_kv_addresses->logical_page(sequence.kv->text, page);
+                if (!text_kv_pages->valid(logical) || text_kv_pages->device_resident(logical)) { continue; }
+                if (!text_kv_pages->host_resident(logical) || !text_kv_pages->host_replica_current(logical)) { continue; }
+                const std::vector<std::uint32_t> one{page};
+                const std::vector<std::uint32_t> back =
+                    restore_kv_pages_from_host(*text_kv_addresses, *text_kv_pages, sequence.kv->text, one);
+                if (!back.empty()) {
+                    ++rescued;
+                    std::fprintf(stderr, "[ring] protect-rescue: page=%u score=%u cap=%u\n", page,
+                                 page, protect_pages_allowed);
+                }
+            }
+        }
         install_resident_selection(decoder ? &decoder->text_kv : nullptr, text_total,
                                    *text_kv_addresses, *text_kv_pages, sequence.kv->text, "text",
                                    "mapped");
@@ -2597,6 +3034,53 @@ void ProgramImpl::commit_sequence_kv(SequenceState& sequence, std::uint32_t main
         }
     }
 
+    // NINFER_KV_HOST_WRITETHROUGH (default OFF, byte-for-byte unchanged when unset/0): give every
+    // NEWLY committed page a current Host replica so a later eviction can restore it and the reuse
+    // gate's "every page host-backed" condition can pass. First version: pages that ALREADY have a
+    // replica are skipped and counted (no detach, no re-publish); a page whose writer reference is
+    // still held is skipped and counted too -- never cleared here.
+    if (const char* writethrough_env = std::getenv("NINFER_KV_HOST_WRITETHROUGH");
+        writethrough_env != nullptr && writethrough_env[0] != (char)0 && writethrough_env[0] != '0' &&
+        host_kv_extents != nullptr && text_kv_pages != nullptr && text_kv_addresses != nullptr) {
+        const std::uint32_t pages_total = proto_pages_for_tokens(main_tokens);
+        std::uint32_t written = 0, skipped_has_replica = 0, skipped_writer = 0;
+        std::uint64_t host_bytes = 0;
+        std::vector<LogicalKVPageHandle> batch;
+        batch.reserve(pages_total);
+        for (std::uint32_t page = 0; page < pages_total; ++page) {
+            const LogicalKVPageHandle logical = text_kv_addresses->logical_page(sequence.kv->text, page);
+            if (!text_kv_pages->valid(logical)) { continue; }
+            if (text_kv_pages->host_resident(logical)) { ++skipped_has_replica; continue; }
+            if (!text_kv_pages->can_pin_source(logical)) { ++skipped_writer; continue; }
+            batch.push_back(logical);
+        }
+        if (!batch.empty()) {
+            std::optional<HostKVExtentReservation> reserved =
+                host_kv_extents->prepare(*text_kv_pages, batch);
+            if (!reserved) {
+                throw std::runtime_error(
+                    "KV host writethrough: the Host tier cannot hold " +
+                    std::to_string(batch.size()) + " of " + std::to_string(pages_total) +
+                    " pages; raise --host-kv-mib (or run without NINFER_KV_HOST_WRITETHROUGH)");
+            }
+            const std::vector<DeviceKVPageHandle> sources = host_kv_extents->device_sources(*reserved);
+            text_kv_pages->physical_pool().copy_to_host(
+                sources, host_kv_extents->writable_view(*reserved), device.stream);
+            if (!host_kv_extents->publish(std::move(*reserved))) {
+                throw std::runtime_error(
+                    "KV host writethrough: the Host store declined to publish " +
+                    std::to_string(batch.size()) + " page replicas (page content left unchanged)");
+            }
+            written = static_cast<std::uint32_t>(batch.size());
+            host_bytes = static_cast<std::uint64_t>(written) *
+                         static_cast<std::uint64_t>(host_kv_extents->page_layout(*text_kv_pages).page_stride);
+        }
+        std::fprintf(stderr,
+                     "[ninfer] host writethrough: written=%u skipped_has_replica=%u skipped_writer=%u "
+                     "pages_total=%u host_bytes=%llu\n",
+                     written, skipped_has_replica, skipped_writer, pages_total,
+                     static_cast<unsigned long long>(host_bytes));
+    }
     if (hybrid_) { hybrid_publish_blocks(sequence); }
 }
 
@@ -2661,6 +3145,9 @@ void ProgramImpl::release_sequence_kv_strict(SequenceState& sequence,
 
 void ProgramImpl::release_sequence_kv(SequenceState& sequence) noexcept {
     if (!sequence.kv) { return; }
+    // ROLLED BACK (2026-10-19): clearing ring_keep / ring_scored_mapped here was a Bug-B experiment.
+    // It never produced a measured improvement and it may perturb the shared-prefix snapshot, so the
+    // sequence state is left exactly as before.
     unbind_sequence_kv(sequence);
     if (sequence.kv->backend && backend_kv_addresses) {
         (void)backend_kv_addresses->release(*sequence.kv->backend);

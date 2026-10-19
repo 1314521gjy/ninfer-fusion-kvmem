@@ -130,6 +130,10 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::nvfp4_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP8_E4M3FN_ROW_BF16:
+    // Both FP8 scale arms share one dispatcher: `fp8_dispatch` reads the width from the weight's
+    // qtype (`fp8_format.cpp`). Only the 2-byte arm existed before 2026-10-11, which is why the
+    // Qwen3.8-Flash-Next artifact's `fp8_e4m3fn_row_f32` weights could not be dispatched at all.
+    case QType::FP8_E4M3FN_ROW_F32:
         detail::fp8_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP32:
@@ -192,6 +196,7 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
         return detail::nvfp4_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                              min_tokens, max_tokens);
     case QType::FP8_E4M3FN_ROW_BF16:
+    case QType::FP8_E4M3FN_ROW_F32: // both scale arms; the width comes from the weight's qtype
         return detail::fp8_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                            min_tokens, max_tokens);
     case QType::FP32:

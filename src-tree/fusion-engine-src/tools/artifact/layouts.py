@@ -89,7 +89,26 @@ class RowScaleGeometry:
     payload_bytes: int
 
 
-CONTIGUOUS_LE_V1 = Layout("contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32")))
+@dataclass(frozen=True, slots=True)
+class PackedPlaneGeometry:
+    """Two planes: a code plane, then a scale plane starting at a 256-byte boundary.
+
+    Used by `packed_u4_g16_v1` (the Qwen3.8-Flash-Next PLE shard). Same shape as RowScaleGeometry --
+    one code plane and one scale plane -- but with a different scale word, so it is its own type
+    rather than a row-scale with different numbers.
+    """
+
+    n: int
+    k: int
+    code_plane_bytes: int
+    scale_plane_offset: int
+    scale_plane_bytes: int
+    payload_bytes: int
+
+
+CONTIGUOUS_LE_V1 = Layout(
+    "contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32", "int64"))
+)
 ROW_SPLIT_K128_V1 = Layout(
     "row_split_k128_v1",
     256,
@@ -110,6 +129,34 @@ ROW_SCALE_V1 = Layout(
 )
 GGUF_BLOCKS_V1 = Layout("gguf_blocks_v1", 256, frozenset(GGUF_FORMATS))
 
+# The three layouts the Qwen3.8-Flash-Next container declares. Their geometry is copied from the
+# engine's own `weight_geometry` (src/core/weight_view.cpp), which is what actually reads these
+# bytes; both sides must agree or `describe_tensor` rejects the object.
+#
+# `packed_u4_g16_v1`: one code plane (K/2 bytes per row, two 4-bit codes per byte) then a scale plane
+# of (K/16)*2 bytes per row -- one binary16 per 16-column group. Appended rather than folded into
+# row_scale_v1 because the scale word is per GROUP here, not per row.
+PACKED_U4_G16_V1 = Layout(
+    "packed_u4_g16_v1",
+    256,
+    frozenset(("u4z8g16_f16",)),
+)
+# `expert_blockscale_k16_m128x4_v1`: the same bytes as BLOCK_SCALE_K16_M128X4_V1 under the name this
+# container uses. The engine parses it to the identical QuantLayout, so one geometry serves both.
+EXPERT_BLOCK_SCALE_K16_M128X4_V1 = Layout(
+    "expert_blockscale_k16_m128x4_v1",
+    256,
+    frozenset(("nvfp4",)),
+)
+# `row_scale_f32_v1`: the same two planes as ROW_SCALE_V1 with a 4-byte scale word. The engine keeps
+# one `row_scale_geometry` and picks the word width from the FORMAT, so this is a second layout
+# constant for one code path rather than a second formula.
+ROW_SCALE_F32_V1 = Layout(
+    "row_scale_f32_v1",
+    256,
+    frozenset(("fp8_e4m3fn_row_f32",)),
+)
+
 LAYOUTS = MappingProxyType(
     {
         layout.name: layout
@@ -117,7 +164,10 @@ LAYOUTS = MappingProxyType(
             CONTIGUOUS_LE_V1,
             ROW_SPLIT_K128_V1,
             BLOCK_SCALE_K16_M128X4_V1,
+            EXPERT_BLOCK_SCALE_K16_M128X4_V1,
             ROW_SCALE_V1,
+            ROW_SCALE_F32_V1,
+            PACKED_U4_G16_V1,
             GGUF_BLOCKS_V1,
         )
     }
@@ -229,12 +279,65 @@ def row_split_geometry(
     )
 
 
+def expert_blockscale_bank_geometry(
+    format: str | Nvfp4Format, shape: Sequence[int]
+) -> BlockScaleGeometry:
+    """A rank-three NVFP4 expert bank, sized exactly as the engine sizes it.
+
+    Copied from `block_scale_bank_geometry` (src/artifact/bank_geometry.cpp), which the engine uses
+    for this layout name: one code plane over every expert's matrix, a 256-aligned scale plane, then
+    **four divisor bytes per expert** -- that last term is what a flattened rank-two view gets wrong
+    (it charges one divisor for the whole bank). Checked against the container: (512,1280,2560) is
+    943,720,448 bytes = 838,860,800 code + 104,857,600 scale + 512*4 divisors, after a 4-byte close.
+    """
+    spec = _format(format)
+    if not isinstance(spec, Nvfp4Format):
+        raise ValueError("expert_blockscale_k16_m128x4_v1 requires NVFP4")
+    dims = _shape(shape)
+    if len(dims) != 3:
+        raise ValueError(
+            f"expert_blockscale_k16_m128x4_v1 requires a rank-three shape, got rank {len(dims)}"
+        )
+    experts, rows, columns = dims
+    if rows % 128 or columns % 64:
+        raise ValueError(
+            "expert_blockscale_k16_m128x4_v1 requires N divisible by 128 "
+            "and K divisible by 64"
+        )
+    matrices = experts * rows
+    elements = matrices * columns
+    code_plane_bytes = elements // 2
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = elements // spec.group_size
+    divisor_offset = scale_plane_offset + scale_plane_bytes
+    divisor_bytes = experts * 4
+    return BlockScaleGeometry(
+        n=matrices,
+        k=columns,
+        groups_per_row=columns // spec.group_size,
+        k_tiles=columns // 64,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        weight_divisor_offset=divisor_offset,
+        weight_divisor_count=experts,
+        payload_bytes=divisor_offset + divisor_bytes,
+    )
+
+
 def block_scale_geometry(
     format: str | Nvfp4Format, shape: Sequence[int], divisors: int = 1
 ) -> BlockScaleGeometry:
     spec = _format(format)
     if not isinstance(spec, Nvfp4Format):
         raise ValueError("block_scale_k16_m128x4_v1 requires NVFP4")
+    # A rank-three shape is an expert bank and has its own rule (four divisor bytes per expert),
+    # exactly as the engine dispatches it. Only the bank layout name accepts rank three.
+    if len(_shape(shape)) == 3:
+        raise ValueError(
+            "block_scale_k16_m128x4_v1 is rank two; a rank-three bank is "
+            "expert_blockscale_k16_m128x4_v1"
+        )
     n, k = _shape(shape, rank=2)
     if n % 128 != 0 or k % 64 != 0:
         raise ValueError(
@@ -268,6 +371,33 @@ def block_scale_geometry(
     )
 
 
+def packed_u4_g16_geometry(
+    format: str | NumericFormat, shape: Sequence[int]
+) -> PackedPlaneGeometry:
+    """The PLE shard: a code plane then a per-16-column binary16 scale plane.
+
+    Copied from the engine's `QuantLayout::PackedU4G16` branch (src/core/weight_view.cpp): two 4-bit
+    codes per byte, one scale word per 16 columns, scale plane aligned to 256.
+    """
+    spec = _format(format)
+    if spec.name != "u4z8g16_f16":
+        raise ValueError("packed_u4_g16_v1 requires u4z8g16_f16")
+    n, k = _shape(shape, rank=2)
+    if k % 16:
+        raise ValueError(f"packed_u4_g16_v1 requires K divisible by 16, got {k}")
+    code_plane_bytes = n * k // 2
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = n * (k // 16) * 2
+    return PackedPlaneGeometry(
+        n=n,
+        k=k,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        payload_bytes=scale_plane_offset + scale_plane_bytes,
+    )
+
+
 def row_scale_geometry(
     format: str | Fp8RowFormat, shape: Sequence[int]
 ) -> RowScaleGeometry:
@@ -275,9 +405,12 @@ def row_scale_geometry(
     if not isinstance(spec, Fp8RowFormat):
         raise ValueError("row_scale_v1 requires a row-scaled FP8 format")
     n, k = _shape(shape, rank=2)
+    # The scale word width is a property of the FORMAT, exactly as the engine's row-scale branch
+    # reads it: the BF16-scale spelling gets 2 bytes per row, the FP32-scale one gets 4.
+    scale_word_bytes = 4 if spec.name == "fp8_e4m3fn_row_f32" else 2
     code_plane_bytes = n * k
     scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
-    scale_plane_bytes = n * 2
+    scale_plane_bytes = n * scale_word_bytes
     return RowScaleGeometry(
         n=n,
         k=k,
@@ -294,7 +427,16 @@ def gguf_blocks_geometry(
     spec = _format(format)
     if not isinstance(spec, GgufFormat):
         raise ValueError("gguf_blocks_v1 requires a ggml block format")
-    n, k = _shape(shape, rank=2)
+    # Block-5: a rank-three shape is an expert bank -- (experts, rows, k), one contiguous run of
+    # whole-block rows with no planes and no padding -- so it sizes exactly as a rank-two matrix of
+    # experts * rows rows, which is how the engine's GgufBlocks branch sizes it too.
+    dims = _shape(shape)
+    if len(dims) == 3:
+        n, k = dims[0] * dims[1], dims[2]
+    elif len(dims) == 2:
+        n, k = dims
+    else:
+        raise ValueError(f"gguf_blocks_v1 requires rank 2 or 3, got rank {len(dims)}")
     if k % spec.block_elements:
         raise ValueError(
             f"gguf_blocks_v1 requires K divisible by {spec.block_elements}, got {k}"
@@ -337,14 +479,18 @@ def encoded_size(
         if not isinstance(numeric_spec, QuantFormat):
             raise ValueError("row_split_k128_v1 requires a grouped quantized format")
         return row_split_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is EXPERT_BLOCK_SCALE_K16_M128X4_V1:
+        return expert_blockscale_bank_geometry(numeric_spec, shape).payload_bytes
     if layout_spec is BLOCK_SCALE_K16_M128X4_V1:
         if not isinstance(numeric_spec, Nvfp4Format):
             raise ValueError("block_scale_k16_m128x4_v1 requires NVFP4")
         return block_scale_geometry(numeric_spec, shape, divisors).payload_bytes
-    if layout_spec is ROW_SCALE_V1:
+    if layout_spec is ROW_SCALE_V1 or layout_spec is ROW_SCALE_F32_V1:
         if not isinstance(numeric_spec, Fp8RowFormat):
             raise ValueError("row_scale_v1 requires a row-scaled FP8 format")
         return row_scale_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is PACKED_U4_G16_V1:
+        return packed_u4_g16_geometry(numeric_spec, shape).payload_bytes
     if layout_spec is GGUF_BLOCKS_V1:
         if not isinstance(numeric_spec, GgufFormat):
             raise ValueError("gguf_blocks_v1 requires a ggml block format")

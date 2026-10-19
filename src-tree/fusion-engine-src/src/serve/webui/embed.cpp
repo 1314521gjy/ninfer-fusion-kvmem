@@ -28,9 +28,9 @@ std::string content_type_for(const std::string& name) {
     if (ext == ".html" || ext == ".htm") { return "text/html; charset=utf-8"; }
     if (ext == ".js" || ext == ".mjs") { return "text/javascript; charset=utf-8"; }
     if (ext == ".css") { return "text/css; charset=utf-8"; }
-    if (ext == ".json" || ext == ".map") { return "application/json"; }
-    if (ext == ".webmanifest") { return "application/manifest+json"; }
-    if (ext == ".svg") { return "image/svg+xml"; }
+    if (ext == ".json" || ext == ".map") { return "application/json; charset=utf-8"; }
+    if (ext == ".webmanifest") { return "application/manifest+json; charset=utf-8"; }
+    if (ext == ".svg") { return "image/svg+xml; charset=utf-8"; }
     if (ext == ".png") { return "image/png"; }
     if (ext == ".jpg" || ext == ".jpeg") { return "image/jpeg"; }
     if (ext == ".webp") { return "image/webp"; }

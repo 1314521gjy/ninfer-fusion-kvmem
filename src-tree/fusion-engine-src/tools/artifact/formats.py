@@ -82,6 +82,27 @@ T2_G128_FP16 = QuantFormat("t2_g128_fp16", 2, 128, -1, 1)
 PTQ1_G128_FP16 = QuantFormat("ptq1_g128_fp16", 2, 128, -1, 1)
 NVFP4 = Nvfp4Format("nvfp4", 16)
 FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
+# The 4-byte-scale spelling of the row-scaled FP8 pair, and the one the Qwen3.8-Flash-Next container
+# uses under the layout name `row_scale_f32_v1`. The engine picks the scale word width from the
+# format, so naming it is all this table needed to gain; the width lives in row_scale_geometry.
+FP8_E4M3FN_ROW_F32 = Fp8RowFormat("fp8_e4m3fn_row_f32")
+# 8 bytes per element, `contiguous_le_v1`. The PLE ngram side data is stored this way.
+INT64 = DirectFormat("int64", 8)
+
+
+@dataclass(frozen=True, slots=True)
+class PackedU4Format:
+    """4-bit codes with a binary16 multiplier per `group_size` columns (the PLE shard).
+
+    Distinct from Fp8RowFormat on purpose: row-scaled FP8 has ONE scale word per row, while this has
+    one per 16-column group, and the two are sized by different formulas.
+    """
+
+    name: str
+    group_size: int
+
+
+U4Z8G16_F16 = PackedU4Format("u4z8g16_f16", 16)
 
 # ggml block types (ggml-common.h), kept byte for byte.
 GGUF_Q2_K = GgufFormat("gguf_q2_k", 10, 256, 84)
@@ -99,9 +120,18 @@ GGUF_IQ2_S = GgufFormat("gguf_iq2_s", 22, 256, 82)
 GGUF_IQ4_XS = GgufFormat("gguf_iq4_xs", 23, 256, 136)
 GGUF_IQ1_M = GgufFormat("gguf_iq1_m", 29, 256, 56)
 GGUF_Q8_0 = GgufFormat("gguf_q8_0", 8, 32, 34)
+# Block-5 IQ3_S artifact: ggml Q2_0 (type id 42), 64 elements per block, 18 bytes (binary16 scale
+# plus 64 / 4 = 16 bytes of 2-bit codes) = 2.25 bits per weight. The community artifact stores nine
+# `blk.<i>.ffn_down_exps.weight` matrices in it, kept byte for byte.
+GGUF_Q2_0 = GgufFormat("gguf_q2_0", 42, 64, 18)
 
+# The three formats the Qwen3.8-Flash-Next container declares were added beside the other format
+# constants above (INT64, FP8_E4M3FN_ROW_F32, U4Z8G16_F16); they live there so every format is
+# declared in one place.
 
-DIRECT_FORMATS = MappingProxyType({item.name: item for item in (BF16, FP32, INT32)})
+DIRECT_FORMATS = MappingProxyType(
+    {item.name: item for item in (BF16, FP32, INT32, INT64)}
+)
 QUANT_FORMATS = MappingProxyType(
     {
         item.name: item
@@ -116,7 +146,13 @@ QUANT_FORMATS = MappingProxyType(
     }
 )
 NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
-FP8_ROW_FORMATS = MappingProxyType({FP8_E4M3FN_ROW_BF16.name: FP8_E4M3FN_ROW_BF16})
+FP8_ROW_FORMATS = MappingProxyType(
+    {
+        item.name: item
+        for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_F32)
+    }
+)
+PACKED_U4_FORMATS = MappingProxyType({U4Z8G16_F16.name: U4Z8G16_F16})
 GGUF_FORMATS = MappingProxyType(
     {
         item.name: item
@@ -136,6 +172,7 @@ GGUF_FORMATS = MappingProxyType(
             GGUF_IQ4_XS,
             GGUF_IQ1_M,
             GGUF_Q8_0,
+            GGUF_Q2_0,
         )
     }
 )
@@ -148,6 +185,7 @@ NUMERIC_FORMATS = MappingProxyType(
         **QUANT_FORMATS,
         **NVFP4_FORMATS,
         **FP8_ROW_FORMATS,
+        **PACKED_U4_FORMATS,
         **GGUF_FORMATS,
     }
 )

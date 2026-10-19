@@ -10,28 +10,31 @@
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
-template <class Geometry, class Schedule>
+template <class Geometry, class Schedule, class Scale = Fp8DefaultScale>
 void launch_fp8_gemv(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     const Fp8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
-    fp8_gemv_kernel<Geometry, Schedule>
+    fp8_gemv_kernel<Geometry, Schedule, Fp8ContiguousOutput, Fp8GemvIdentityRows, false,
+                    Fp8IdentityEpilogue, Scale>
         <<<Geometry::kOutputRows / Schedule::kRowsPerCta, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const __nv_bfloat16*>(weight.scales), output);
+            static_cast<const Scale*>(weight.scales), output);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Geometry, int Capacity, class Schedule, bool FullColumns = false>
+template <class Geometry, int Capacity, class Schedule, bool FullColumns = false,
+          class Scale = Fp8DefaultScale>
 void launch_fp8_simt(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     constexpr int blocks = Geometry::kOutputRows / Schedule::kRowsPerCta *
                            ((Capacity + Schedule::kTokenTile - 1) / Schedule::kTokenTile);
     const Fp8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
     fp8_simt_kernel<Geometry, Capacity, Schedule, Fp8ContiguousOutput, Fp8IdentityEpilogue,
-                    Fp8GemvIdentityRows, false, Fp8SimtFinalization::Elementwise, !FullColumns>
+                    Fp8GemvIdentityRows, false, Fp8SimtFinalization::Elementwise, !FullColumns,
+                    Scale>
         <<<blocks, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const __nv_bfloat16*>(weight.scales), output, {}, {}, x.ne[1]);
+            static_cast<const Scale*>(weight.scales), output, {}, {}, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 

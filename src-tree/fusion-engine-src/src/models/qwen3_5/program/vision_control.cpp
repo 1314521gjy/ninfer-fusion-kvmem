@@ -1,4 +1,9 @@
 #include "models/qwen3_5/program/vision_control.h"
+// Angle brackets, not quotes: the exported layer prefix lives under the layer's `export` directory
+// on the include path (the same shape as <ninfer/models/qwen3_8_flash_next/...> elsewhere in this
+// tree). A quoted form resolves against the including file's own directory first, which is
+// src/models/qwen3_5/program/ and has no models/qwen3_vision beneath it.
+#include <ninfer/models/qwen3_vision/vision.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +35,32 @@ std::size_t checked_mul(std::size_t left, std::size_t right, const char* label) 
 }
 
 } // namespace
+
+VisionControlPlan plan_vision_control(const PreparedPromptData& prompt) {
+    // Upstream takes the geometry from compile-time architecture constants, not from a parameter:
+    // `targets/qwen3_6/impl/vision/control.cpp` opens its anonymous namespace with
+    //     constexpr std::int32_t kMerge        = 2;
+    //     constexpr std::int32_t kPositionSide = 48;
+    // and its plan_vision_control(prompt) uses those throughout. This tree already carries that
+    // geometry once, in the ported vision tower (`models/qwen3_vision/vision.h`,
+    // VisionTowerConfig), so it is read from there rather than restated as bare literals -- one
+    // fact, one definition. This overload exists because the ported qwen3_8_flash_next program
+    // calls the upstream single-argument form; it delegates to the two-argument form, which stays
+    // the general entry point.
+    using ninfer::models::qwen3_vision::VisionTowerConfig;
+    constexpr std::uint32_t kMerge        = VisionTowerConfig::merge;
+    // position_embeddings is position_grid_side^2, so the side is its exact integer square root.
+    // qwen3_vision's `VisionTowerConfig::head_dim` is declared the same way (`hidden / heads`).
+    constexpr std::uint32_t kPositionSide = VisionTowerConfig::position_embeddings == 48U * 48U
+                                                ? 48U
+                                                : 0U;
+    static_assert(kMerge == 2U && kPositionSide == 48U,
+                  "vision control geometry must match the upstream kMerge/kPositionSide constants");
+    VisionConfig config;
+    config.spatial_merge_size = kMerge;
+    config.position_grid_side = kPositionSide;
+    return plan_vision_control(prompt, config);
+}
 
 VisionControlPlan plan_vision_control(const PreparedPromptData& prompt,
                                       const VisionConfig& config) {

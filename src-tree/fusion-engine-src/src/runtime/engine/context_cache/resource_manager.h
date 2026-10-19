@@ -5,6 +5,7 @@
 #include "runtime/contract/resources.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/context_cache/materialization_planner.h"
+#include "runtime/engine/context_cache/recency_ladder_support.h"
 #include "runtime/engine/context_cache/shared_capture_planner.h"
 
 #include <algorithm>
@@ -63,6 +64,153 @@ struct CheckpointObservation {
 
 // ResourceManager owns logical policy only.  Every physical feasibility decision and mutation is
 // represented by an opaque ModelContract::ResourcePlan sealed against Program::resource_revision().
+
+// WHY A SECOND PLANNER EXISTS AT ALL
+//   The materialization planner drives the ContextCache "recency ladder": it ranks owners by recency
+//   (`PressureInputs::recency_owner_ids`), bounds the ladder by the owner count, licenses eviction
+//   of the oldest ones and demotes the kept owners to host. That whole mechanism is specific to THIS
+//   engine's generation of the cache. Neither reference has it: upstream's tree has no
+//   `context_cache/` directory at all, and the ported Qwen3.8-Flash-Next target expresses its
+//   planning through `root_maximal_target` / `guided_closure_target` / `guidance` / `assess`
+//   instead -- a different decomposition of the same problem, not a subset of this one (see
+//   `docs/20 §10.7.4`).
+//   So the two contracts need two planners.
+
+// An opt-in marker: a contract provides the materialization planner only when its pressure-planning
+// session derives from `RecencyLadderSupported` -- an explicit declaration, not a name probe. The
+// first attempt here tested `ModelContract::CapturePressurePlanningSession` and BOTH contracts alias
+// that name (`models/qwen3_8_flash_next/.../target_contract.h:62`), so the probe matched everywhere,
+// the ported contract was still sent to `MaterializationPlanner`, and the build failed with the
+// identical 19 errors. That falsified the probe's own assumption; a tag cannot be aliased into
+// existence. The tag lives in its own header so a model's Program header can name it without
+// pulling this one in.
+
+// The planner for a contract that has no recency ladder. It satisfies the exact surface
+// `plan_materialization` uses and always answers "no plan", which is the truthful answer: a target
+// whose Program cannot be driven through the pressure session also cannot be materialized into the
+// context cache, so the manager falls through to its existing "TemporarilyBlocked" path instead of
+// applying a policy that model never agreed to. Hybrid mode is refused earlier, by the Engine's
+// choice of core; this planner covers the Legacy mode that `ContextCacheOptions::enabled` defaults
+// to (true, `ninfer/types.h:260`).
+//
+// 2026-10-11: one deliberate exception was added, for the ported Qwen3.8-Flash-Next contract. When a
+// request has no catalogued owner and no checkpoint policy there is no pressure to reason about, and
+// "no plan" was not the truthful answer for it -- it made every admission of such a request
+// permanently blocked, which is how the ported engine died in its own warmup. That single case now
+// seals the root candidate through `Program::seal_identity`; every request that does have pressure
+// keeps the original refusal below unchanged. The witness for which case ran is the
+// `[no-pressure] identity sealed` line under `NINFER_FLASH_NEXT_TRACE_ADMISSION`.
+template <class ModelContract>
+class NoPressurePlanner {
+public:
+    using Program            = typename ModelContract::Program;
+    using PreparedPrompt     = typename ModelContract::PreparedPrompt;
+    using AdmissionCandidate = typename ModelContract::AdmissionCandidate;
+    using ResourcePlan       = typename ModelContract::ResourcePlan;
+    using ContinuationHandle = typename ModelContract::ContinuationHandle;
+    using SharedPrefixHandle = typename ModelContract::SharedPrefixHandle;
+    using Clock              = std::chrono::steady_clock;
+
+    struct CandidateInput {
+        AdmissionCandidate* candidate = nullptr;
+        PlanningCandidateId id;
+        std::uint32_t stable_ordinal = 0;
+        bool current_session_binding = false;
+    };
+
+    struct LogicalGoal {
+        std::uint32_t publication_slot = std::numeric_limits<std::uint32_t>::max();
+    };
+
+    struct PressureInputs {
+        std::span<const ContinuationHandle* const> private_owners;
+        std::span<const PlanningOwnerId> private_owner_ids;
+        std::span<const SharedPrefixHandle* const> shared_owners;
+        std::span<const PlanningOwnerId> shared_owner_ids;
+        std::span<const MaterializationOwnerPolicy> owner_policy;
+        std::span<const MaterializationCheckpointPolicy> checkpoint_policy;
+        std::span<const PlanningOwnerId> recency_owner_ids;
+    };
+
+    struct Result {
+        std::optional<ResourcePlan> plan;
+        PlanningCandidateId candidate;
+        std::uint32_t publication_slot = std::numeric_limits<std::uint32_t>::max();
+        PrivateSourceMode source_mode  = PrivateSourceMode::ConsumeToActive;
+        // The same two vectors `MaterializationPlanner::Result` declares
+        // (`materialization_planner.h:119-120`), read at `resource_manager.h:2829/2841/2855`. Empty
+        // is the honest value here: this planner never produces a plan, so no owner is ever
+        // sacrificed and no checkpoint is ever dropped.
+        std::vector<PressureOwnerOutcome> owner_outcomes;
+        std::vector<PressureCheckpointOutcome> checkpoint_outcomes;
+        MaterializationDiagnostics diagnostics;
+    };
+
+    template <class PressureInputsFn, class LogicalGoalFn, class FinalScheduleFn>
+    [[nodiscard]] std::optional<Result>
+    plan(Program& program, const PreparedPrompt& prompt,
+         const ContextMachineCostModel& /*machine_cost*/,
+         std::span<const CandidateInput> candidates, std::uint32_t root_candidate_index,
+         PressureInputsFn&& pressure_inputs, LogicalGoalFn&& logical_goal,
+         FinalScheduleFn&& /*final_schedule*/, Clock::time_point /*planning_started*/,
+         PlanningAllowance /*allowance*/ = {}) {
+        if (const char* diag_text = std::getenv("NINFER_KV_DIAG_PLAN"); diag_text != nullptr && diag_text[0] != (char)0 && std::strtol(diag_text, nullptr, 10) > 0) { std::fprintf(stderr, "[diag] np-planner-enter cand=%zu\n", candidates.size()); }
+        if (candidates.empty() || root_candidate_index >= candidates.size()) { return std::nullopt; }
+        const CandidateInput& root = candidates[root_candidate_index];
+        if (root.candidate == nullptr) { return std::nullopt; }
+        // The one narrow exception to the refusal above: a request with NOTHING TO SEARCH. With no
+        // catalogued owners and no checkpoint policies there is no optional search to skip, so the
+        // identity plan is not a shortcut -- it is the complete plan, and refusing it was wrong.
+        // `pressure_inputs` is documented as callable at most once (`resource_manager.h:2566-2570`);
+        // that holds here because this planner asks exactly once and has no later caller.
+        const PressureInputs inputs = pressure_inputs();
+        if (!inputs.private_owners.empty() || !inputs.shared_owners.empty() ||
+            !inputs.checkpoint_policy.empty()) {
+            return std::nullopt;
+        }
+        const std::optional<LogicalGoal> goal =
+            logical_goal(root.id, PrivateSourceMode::ConsumeToActive,
+                         std::span<const PressureOwnerOutcome>{});
+        if (!goal) { return std::nullopt; }
+        // `prompt` is passed through because sealing needs it whether or not it reads it, and the
+        // final schedule intent is deliberately left empty: `Program::seal_identity` takes both the
+        // prompt and the intent unnamed (program.cpp:1643-1644), so the shared-frontier pricing the
+        // caller would compute cannot reach the plan. `final_schedule` is therefore never called on
+        // this path -- which is also why the ported `shared_capture_split_prefill_work` stub cannot
+        // make this placement silently cheap.
+        std::optional<ResourcePlan> sealed =
+            program.seal_identity(*root.candidate, prompt, FinalScheduleIntent{});
+        if (!sealed) { return std::nullopt; }
+        Result result;
+        result.plan             = std::move(*sealed);
+        result.candidate        = root.id;
+        result.publication_slot = goal->publication_slot;
+        result.source_mode      = PrivateSourceMode::ConsumeToActive;
+        // `owner_outcomes` and `checkpoint_outcomes` stay empty and `diagnostics` keeps its default
+        // stop reason (`NoPressure`, a member of the planner's own set) -- both are this class's
+        // documented honest values, and neither is reachable on a request with nothing to search.
+        if (std::getenv("NINFER_FLASH_NEXT_TRACE_ADMISSION") != nullptr) {
+            std::fprintf(stderr, "[no-pressure] identity sealed cand=%u slot=%u intent=unused\n",
+                         root.id.value, goal->publication_slot);
+        }
+        return result;
+    }
+};
+
+template <class ModelContract, class = void>
+struct ContractPlanner {
+    using Type = NoPressurePlanner<ModelContract>;
+};
+
+template <class ModelContract>
+struct ContractPlanner<ModelContract,
+                       std::void_t<typename ModelContract::CapturePressurePlanningSession>> {
+    using Type = std::conditional_t<
+        std::is_base_of_v<RecencyLadderSupported,
+                          typename ModelContract::CapturePressurePlanningSession>,
+        MaterializationPlanner<ModelContract>, NoPressurePlanner<ModelContract>>;
+};
+
 template <class ModelContract>
 class ResourceManager {
 public:
@@ -88,7 +236,7 @@ public:
     using StartResult                       = typename ModelContract::StartResult;
     using FinishResult                      = typename ModelContract::FinishResult;
     using AbortResult                       = typename ModelContract::AbortResult;
-    using Planner                           = MaterializationPlanner<ModelContract>;
+    using Planner                           = typename ContractPlanner<ModelContract>::Type;
     using CapturePlanner                    = SharedCapturePlanner<ModelContract>;
 
 private:
@@ -273,6 +421,17 @@ public:
         }
         for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
             active_[lane].shared_sources.reserve(shared_catalog_capacity);
+        }
+        // Which planner a contract selected is a COMPILE-TIME decision (`ContractPlanner`, above), so
+        // without a line like this a run has no way to witness which arm answered: "the planner
+        // refused" and "the other arm was never linked in" look identical from outside (docs/39
+        // section 9.5-3). Printed once per manager, at construction, under the same env gate as the
+        // admission trace.
+        if (std::getenv("NINFER_FLASH_NEXT_TRACE_ADMISSION") != nullptr) {
+            constexpr bool no_pressure_arm =
+                std::is_same_v<Planner, NoPressurePlanner<ModelContract>>;
+            std::fprintf(stderr, "[planner] arm=%s\n",
+                         no_pressure_arm ? "no-pressure" : "materialization");
         }
     }
 
@@ -499,7 +658,10 @@ public:
         std::optional<Choice> selected =
             plan_materialization(program, prompt, base, *destination, candidates, publication_order,
                                  planning_started, provisional_demand, allowance);
-        if (!selected) { return {.readiness = Readiness::TemporarilyBlocked}; }
+        if (!selected) {
+            diag_admit_tempblocked(static_cast<std::size_t>(0));
+            return {.readiness = Readiness::TemporarilyBlocked};
+        }
         return {
             .readiness = selected->needs_transfer() ? Readiness::NeedsTransfer : Readiness::Ready,
             .choice    = std::move(selected),
@@ -1645,6 +1807,39 @@ private:
         return ActiveOwnerEdge{.owner = capability.owner, .slot = capability.slot};
     }
 
+    // NINFER_KV_DIAG_PLAN: read-only probes for the legacy plan path. OFF (unset/empty/0) returns
+    // before formatting, so behaviour and output are byte-for-byte unchanged.
+    [[nodiscard]] static bool diag_plan_enabled() noexcept {
+        const char* text = std::getenv("NINFER_KV_DIAG_PLAN");
+        return text != nullptr && text[0] != '\0' && std::strtol(text, nullptr, 10) > 0;
+    }
+    static void diag_plan_null(const char* site) noexcept {
+        if (!diag_plan_enabled()) { return; }
+        std::fprintf(stderr,
+                     "[diag] plan-null site=%s slot=n/a state=n/a handle=n/a active_edge=n/a "
+                     "entitlement=n/a avail=n/a reserved=n/a evictable=n/a note=n/a\n", site);
+    }
+    // Enhanced probe for the planner-return site: the failed branch is a THREE-way conjunction
+    // (!planned || !planned->plan || no matching candidate), so the boolean shape must be printed
+    // before any fix is attempted.
+    static void diag_plan_null_planned(const char* site, int planned, int has_plan,
+                                       int candidate_found, std::size_t candidates) noexcept {
+        if (!diag_plan_enabled()) { return; }
+        std::fprintf(stderr,
+                     "[diag] plan-null site=%s planned=%d has_plan=%d candidate_found=%d "
+                     "candidates=%zu slot=n/a state=n/a handle=n/a active_edge=n/a "
+                     "entitlement=n/a avail=n/a reserved=n/a evictable=n/a note=planner\n",
+                     site, planned, has_plan, candidate_found, candidates);
+    }
+    static void diag_plan_ok(const char* site) noexcept {
+        if (!diag_plan_enabled()) { return; }
+        std::fprintf(stderr, "[diag] plan-ok site=%s pages=n/a session=n/a reuse_tok=n/a\n", site);
+    }
+    static void diag_admit_tempblocked(std::size_t slots_active) noexcept {
+        if (!diag_plan_enabled()) { return; }
+        std::fprintf(stderr, "[diag] admit-tempblocked reason=plan_null slots_active=%zu\n", slots_active);
+    }
+
     [[nodiscard]] bool private_has_active_edge(std::uint32_t slot) const noexcept {
         return std::any_of(active_.begin(), active_.begin() + lane_count_,
                            [&](const ActiveEntry& active) {
@@ -2611,14 +2806,17 @@ private:
                 static_cast<std::size_t>(candidate_record - candidate_inputs.begin());
             const Candidate& candidate = candidates[candidate_index];
             if (candidate.shared_source && source_mode != PrivateSourceMode::Retain) {
+        diag_plan_null("L2796");
                 return std::nullopt;
             }
             if (!candidate.private_source && !candidate.shared_source &&
                 source_mode == PrivateSourceMode::Retain) {
+        diag_plan_null("L2767");
                 return std::nullopt;
             }
             if (candidate.private_source && source_mode != PrivateSourceMode::Retain &&
                 source_mode != PrivateSourceMode::ConsumeToActive) {
+        diag_plan_null("L2805");
                 return std::nullopt;
             }
 
@@ -2638,12 +2836,14 @@ private:
                 const PressureOwnerOutcome& outcome = outcomes[row];
                 if (outcome.disposition != VictimDisposition::Retained &&
                     outcome.disposition != VictimDisposition::Evicted) {
+        diag_plan_null("L2824");
                     return std::nullopt;
                 }
                 if (std::find_if(outcomes.begin(), outcomes.begin() + row,
                                  [&](const PressureOwnerOutcome& prior) {
                                      return prior.owner == outcome.owner;
                                  }) != outcomes.begin() + row) {
+        diag_plan_null("L2830");
                     return std::nullopt;
                 }
                 const auto record = std::find_if(
@@ -2655,6 +2855,7 @@ private:
                     const std::uint32_t slot = record->capability.slot;
                     if (slot >= catalog_count_ ||
                         (candidate.private_source && slot == candidate.private_source->slot)) {
+        diag_plan_null("L2841");
                         return std::nullopt;
                     }
                     const CatalogEntry& entry = catalog_[slot];
@@ -2662,6 +2863,7 @@ private:
                         entry.id != record->capability.owner.id ||
                         entry.revision != record->capability.generation ||
                         private_has_active_edge(slot)) {
+        diag_plan_null("L2848");
                         return std::nullopt;
                     }
                     if (publication_slot == kInvalidCatalogSlot &&
@@ -2672,6 +2874,7 @@ private:
                     const std::uint32_t slot = record->capability.slot;
                     if (slot >= shared_catalog_count_ ||
                         (candidate.shared_source && slot == candidate.shared_source->slot)) {
+        diag_plan_null("L2858");
                         return std::nullopt;
                     }
                     const SharedCatalogEntry& entry = shared_catalog_[slot];
@@ -2679,6 +2882,7 @@ private:
                         entry.id != record->capability.owner.id ||
                         entry.revision != record->capability.generation ||
                         entry.transaction_pins != 0 || shared_active_edge_count(slot) != 0) {
+        diag_plan_null("L2865");
                         return std::nullopt;
                     }
                 }
@@ -2713,6 +2917,10 @@ private:
                                    })
                     : candidate_inputs.end();
         if (!planned || !planned->plan || selected_candidate == candidate_inputs.end()) {
+            diag_plan_null_planned("L2906cur", planned ? 1 : 0,
+                                   (planned && planned->plan) ? 1 : 0,
+                                   selected_candidate == candidate_inputs.end() ? 0 : 1,
+                                   candidate_inputs.size());
             return std::nullopt;
         }
 
@@ -2767,6 +2975,7 @@ private:
                 });
             }
         }
+        diag_plan_ok("L2930");
         return choice;
     }
 

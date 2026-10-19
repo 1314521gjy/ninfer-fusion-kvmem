@@ -85,6 +85,7 @@ VectorLaunch vector_launch(GgmlType type) {
     case GgmlType::IQ1_M: return vec_launch<GGML_TYPE_IQ1_M>;
     case GgmlType::IQ4_NL: return vec_launch<GGML_TYPE_IQ4_NL>;
     case GgmlType::IQ4_XS: return vec_launch<GGML_TYPE_IQ4_XS>;
+    case GgmlType::Q2_0: return vec_launch<GGML_TYPE_Q2_0>;
     }
     throw std::invalid_argument("gguf vector product: unsupported block type");
 }
@@ -304,11 +305,19 @@ BlockShape block_shape(GgmlType type) {
     case GgmlType::IQ2_S: return {256, 82};
     case GgmlType::IQ4_XS: return {256, 136};
     case GgmlType::IQ1_M: return {256, 56};
+    // Block-5: ggml Q2_0 (type id 42), QK2_0 = 64 elements, 2-byte binary16 scale plus
+    // 64 / 4 = 16 bytes of 2-bit codes.
+    case GgmlType::Q2_0: return {64, 18};
     }
     throw std::invalid_argument("gguf: unsupported block type");
 }
 
-bool has_matrix_kernel(GgmlType type) { return type != GgmlType::IQ1_M; }
+// IQ1_M has no matrix kernel (nor does it in llama.cpp); Q2_0 has no matrix instance in this tree
+// (its vector decoder exists, the matrix template is not instantiated). Both take the vector path
+// or a dequantized fallback at the call sites that need one.
+bool has_matrix_kernel(GgmlType type) {
+    return type != GgmlType::IQ1_M && type != GgmlType::Q2_0;
+}
 
 int multiprocessor_count() { return detail::device_facts().sm_count; }
 
@@ -319,11 +328,16 @@ std::size_t vector_activation_bytes(int k, int columns) {
 void quantize_vector_activation(const __nv_bfloat16* x, int k, int columns,
                                 const std::int32_t* input_columns, void* out,
                                 cudaStream_t stream) {
-    if (k <= 0 || k % detail::kQuantizeThreads != 0 || columns <= 0) {
-        throw std::invalid_argument("gguf vector activation: K must be whole 256-value groups");
+    // k must be whole 32-value groups (one q8_1 scale slot each): warp-aligned, which is what the
+    // per-warp reduction needs. It is NOT k % 256: the experts' down projection has K = 640
+    // (20 groups), and the grid below simply takes one more partial tile -- threads past k return
+    // before any reduction, and whole warps do, because k % 32 == 0. (Block-5 change; the previous
+    // k % kQuantizeThreads gate made every K = 640 product impossible.)
+    if (k <= 0 || k % QK8_1 != 0 || columns <= 0) {
+        throw std::invalid_argument("gguf vector activation: K must be whole 32-value groups");
     }
     auto* base = static_cast<std::uint8_t*>(out);
-    const dim3 blocks(k / detail::kQuantizeThreads, columns, 1);
+    const dim3 blocks((k + detail::kQuantizeThreads - 1) / detail::kQuantizeThreads, columns, 1);
     detail::quantize_vector_kernel<<<blocks, detail::kQuantizeThreads, 0, stream>>>(
         x, input_columns, reinterpret_cast<std::int8_t*>(base),
         reinterpret_cast<half2*>(base + detail::vec_scales_offset(k, columns)), k);

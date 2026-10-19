@@ -29,6 +29,11 @@ enum class GgmlType : int {
     IQ2_S   = 22,
     IQ4_XS  = 23,
     IQ1_M   = 29,
+    // Block-5 IQ3_S artifact: nine `ffn_down_exps` matrices are stored in ggml's Q2_0 (type id 42,
+    // 64-value blocks of 18 bytes). The vector-kernel mechanism for it exists (the Decoder
+    // specialization in ggml_bridge_vec.cuh); there is no matrix (mmq) instance, so
+    // `has_matrix_kernel` stays false for it and products go through the vector path.
+    Q2_0    = 42,
 };
 
 struct BlockShape {

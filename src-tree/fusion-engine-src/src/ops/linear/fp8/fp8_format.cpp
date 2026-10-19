@@ -44,19 +44,30 @@ Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operatio
     geometry.code_plane_bytes   = checked_mul(static_cast<std::uint64_t>(weight.n),
                                               static_cast<std::uint64_t>(weight.k), operation);
     geometry.scale_plane_offset = align_up(geometry.code_plane_bytes, 256, operation);
-    geometry.scale_plane_bytes  = checked_mul(static_cast<std::uint64_t>(weight.n), 2, operation);
+    // Two scale arms, exactly as upstream keeps them (`src/ops/linear/fp8/fp8_format.cpp:46-47`
+    // there): the 2-byte `__nv_bfloat16` word every Qwen3.5 shape in this tree uses, and the 4-byte
+    // `float` word the Qwen3.8-Flash-Next artifact carries (`fp8_e4m3fn_row_f32` ->
+    // QType::FP8_E4M3FN_ROW_F32). Before 2026-10-11 this function accepted only the 2-byte arm, so
+    // the ported family's FP8 weights could not even be described.
+    const bool f32_scales                = weight.qtype == QType::FP8_E4M3FN_ROW_F32;
+    const std::uint64_t scale_word_bytes = f32_scales ? 4U : 2U;
+    geometry.scale_plane_bytes =
+        checked_mul(static_cast<std::uint64_t>(weight.n), scale_word_bytes, operation);
     geometry.required_payload_bytes =
         checked_add(geometry.scale_plane_offset, geometry.scale_plane_bytes, operation);
 
-    const std::int64_t scale_stride = static_cast<std::int64_t>(weight.n) * 2;
-    if (weight.qtype != QType::FP8_E4M3FN_ROW_BF16 || weight.layout != QuantLayout::RowScale ||
-        weight.scale_dtype != DType::BF16 ||
+    const std::int64_t scale_stride =
+        static_cast<std::int64_t>(weight.n) * static_cast<std::int64_t>(scale_word_bytes);
+    if ((weight.qtype != QType::FP8_E4M3FN_ROW_BF16 && weight.qtype != QType::FP8_E4M3FN_ROW_F32) ||
+        weight.layout != QuantLayout::RowScale ||
+        weight.scale_dtype != (f32_scales ? DType::FP32 : DType::BF16) ||
         weight.group_size != static_cast<std::uint32_t>(weight.k) || weight.group != weight.k ||
         weight.ndim != 2 || weight.shape[0] != weight.n || weight.shape[1] != weight.k ||
         weight.shape[2] != 1 || weight.shape[3] != 1 || weight.padded_shape[0] != weight.n ||
         weight.padded_shape[1] != weight.k || weight.padded_shape[2] != 1 ||
         weight.padded_shape[3] != 1 || weight.scale_ne[0] != weight.n || weight.scale_ne[1] != 1 ||
-        weight.scale_ne[2] != 1 || weight.scale_ne[3] != 1 || weight.scale_nb[0] != 2 ||
+        weight.scale_ne[2] != 1 || weight.scale_ne[3] != 1 ||
+        weight.scale_nb[0] != static_cast<std::int64_t>(scale_word_bytes) ||
         weight.scale_nb[1] != scale_stride || weight.scale_nb[2] != scale_stride ||
         weight.scale_nb[3] != scale_stride || weight.payload == nullptr ||
         weight.qdata == nullptr || weight.scales == nullptr || weight.qhigh != nullptr ||

@@ -45,6 +45,14 @@ struct SamplingConfig {
     // Every reachable column must allow at least one token with a finite logit.
     const std::uint32_t* token_mask = nullptr;
     std::int32_t token_mask_stride  = 0; // words per column; ordinary sample uses column zero
+    // The upstream spelling of the same device bitset: `[ceil(token_domain/32)]` words, bit v is
+    // `(uint32_t(allowed_tokens[v/32]) >> (v%32)) & 1`, and a zero bit drives the adjusted logit to
+    // negative infinity before ranking and filtering (upstream ops/sampling.h). It is word-for-word
+    // compatible with `token_mask` + `token_mask_stride == 1` -- which is exactly the case the
+    // ordinary sample uses -- and the kernel accepts either. One mechanism under two names, so the
+    // ported qwen3_8_flash_next program, which writes the upstream name, needs no adapter and no
+    // second mask format.
+    const std::int32_t* allowed_tokens = nullptr;
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive

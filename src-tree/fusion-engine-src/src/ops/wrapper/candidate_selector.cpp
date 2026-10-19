@@ -84,8 +84,10 @@ std::size_t candidate_selector_path_workspace_capacity_bytes(int min_steps, int 
     for (int k = min_steps; k <= max_steps; ++k)
         for (int b = min_batch; b <= max_batch; ++b) {
             auto scope = layout.scope();
+            // with_tree = true: the reservation must cover the S-A tree buffers regardless of the
+            // environment, so that planning/startup.cpp's scratch size is not a function of a switch.
             (void)detail::allocate_selector_workspace(
-                layout, detail::candidate_selector_path_route(k, b), k, b);
+                layout, detail::candidate_selector_path_route(k, b), k, b, /*with_tree=*/true);
         }
     return layout.peak_bytes();
 }

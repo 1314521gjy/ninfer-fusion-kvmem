@@ -17,6 +17,29 @@
 #include <tuple>
 
 namespace ninfer::artifact {
+
+// REFUSED, NOT STUBBED. The reference resolves a materialized object's absolute file offset through a
+// side table built during materialization: `materializer.cpp:84` holds
+// `g_mapped_file_offsets` and `:167` fills it from `PayloadSpan::absolute_offset`, which the
+// reference's `reader.h` carries (`{std::uint64_t absolute_offset; std::span<const std::byte> data;}`,
+// derived at `reader.cpp:458-462` as `payload_start + object_offset(object)`). This tree's
+// `artifact::Reader` exposes neither `payload()` nor `absolute_offset`, so the offset cannot be
+// computed here, and the one consumer --
+// `impl/load/materialized.cpp:343`, the `NINFER_FLASH_NEXT_PIN_READFILE` path that streams the expert
+// bank straight from the artifact file -- cannot be served.
+//
+// Returning 0 (the reference's own fall-through) would be worse than refusing: that path would then
+// read `read_bank_from_file` at file offset 0 and stream the wrong bytes as expert weights, with no
+// error. The readfile path is off by default (`pin_readfile_mode()` returns 0 unless the environment
+// variable is set), so refusing costs nothing today and names the gap if anyone turns it on.
+std::uint64_t artifact_object_offset(const MaterializedArtifact& /*artifact*/, ObjectHandle /*handle*/) {
+    throw ArtifactError(
+        "artifact_object_offset: this engine's Reader does not carry the mapped-payload absolute "
+        "offset the reference derives (reader.cpp:458), so the NINFER_FLASH_NEXT_PIN_READFILE path "
+        "cannot be served. Port the offset side table (reference materializer.cpp:84/167) or unset "
+        "that variable.");
+}
+
 namespace {
 
 constexpr std::size_t kSlotBytes        = 64ULL * 1024 * 1024;
@@ -137,6 +160,13 @@ const WeightParent& MaterializedArtifact::device_parent(ObjectHandle handle) con
     return *objects_[handle.index].device;
 }
 
+void* MaterializedArtifact::device_data(ObjectHandle handle) const {
+    // Reuses device_parent's guard so the failure reads the same as the rest of this class, and so
+    // a handle that names no materialized tensor throws here rather than feeding a null base
+    // address to a kernel.
+    return const_cast<std::byte*>(device_parent(handle).data);
+}
+
 const WeightParent& MaterializedArtifact::host_parent(ObjectHandle handle) const {
     if (handle.index >= objects_.size() || !objects_[handle.index].host) {
         throw ArtifactError("object has no Host weight backing");
@@ -149,6 +179,48 @@ std::span<const std::byte> MaterializedArtifact::host_bytes(ObjectHandle handle)
         throw ArtifactError("object has no retained Host bytes");
     }
     return objects_[handle.index].host_data;
+}
+
+std::span<const std::byte> MaterializedArtifact::mapped_tensor_bytes(ObjectHandle handle) const {
+    if (handle.index >= objects_.size()) {
+        throw ArtifactError("object handle does not name a mapped tensor");
+    }
+    const ObjectStorage& storage = objects_[handle.index];
+    // Residency::Mapped: the span points into the entry's read-only mapping, which `mapping_lease_`
+    // keeps alive. Before this branch existed the only ways to satisfy a mapped read were the
+    // page-locked copy or a retained Host copy, i.e. 63 GiB + 30 GiB of private memory.
+    if (!storage.mapped.empty()) { return storage.mapped; }
+    // Pinned is where this engine's `retain_mapped_tensor` lands: the payload was read into the
+    // page-locked block, so its span is the object's `WeightParent` bytes in that block.
+    if (storage.pinned) {
+        const WeightParent& parent = *storage.pinned;
+        return {parent.data, static_cast<std::size_t>(parent.geometry.bytes)};
+    }
+    if (!storage.host_data.empty()) { return storage.host_data; }
+    throw ArtifactError("object handle does not name a mapped tensor");
+}
+
+std::string_view MaterializedArtifact::object_id(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || objects_[handle.index].id.empty()) {
+        throw ArtifactError("object handle has no recorded id");
+    }
+    return objects_[handle.index].id;
+}
+
+std::uint64_t MaterializedArtifact::mapped_file_offset(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || objects_[handle.index].mapped.empty()) {
+        throw ArtifactError("object handle does not name a mapped tensor");
+    }
+    return objects_[handle.index].mapped_file_offset;
+}
+
+DeviceArena& MaterializedArtifact::device_arena() {
+    // Rank 0 is the primary device and always exists; the same invariant the device placements rely
+    // on. An empty list means the artifact was never materialized.
+    if (arenas_.empty() || !arenas_.front()) {
+        throw ArtifactError("materialized artifact has no primary device arena");
+    }
+    return *arenas_.front();
 }
 
 bool MaterializedArtifact::has_device(ObjectHandle handle) const noexcept {
@@ -165,6 +237,15 @@ const WeightParent& MaterializedArtifact::pinned_parent(ObjectHandle handle) con
 std::span<const std::byte> MaterializedArtifact::pinned_block() const noexcept {
     if (!pinned_) { return {}; }
     return {static_cast<const std::byte*>(pinned_->data()), pinned_->size()};
+}
+
+MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan& plan,
+                                 DeviceContext& device, const StartupObserver* startup_observer,
+                                 std::unique_ptr<EvictableWeightPool> backing) {
+    // The shared implementation below reserves from the plan and moves Host payloads out of it, so
+    // the const overload hands it a copy. Callers that hold the plan as a member keep theirs.
+    MaterializationPlan copy = plan;
+    return materialize(reader, std::move(copy), device, startup_observer, std::move(backing));
 }
 
 MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& plan,
@@ -224,6 +305,24 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
                 out.stats_.offloaded_device_capacity_bytes, capacity, "offloaded device capacity");
         }
     }
+    // Every object's id is recorded once, up front. A failed read must be able to name the object,
+    // and the id has to be the artifact's own (not a label a reader synthesized) so an outside
+    // comparator can look it up in a digest of the file.
+    for (std::size_t i = 0; i < out.objects_.size(); ++i) {
+        out.objects_[i].id = object_id(reader.directory().object(ObjectHandle{i}));
+    }
+    // Mapped objects are not read at all: they stay in the container's read-only mapping, and the
+    // lease is what keeps that mapping alive once the Reader goes out of scope.
+    if (!plan.mapped_objects.empty()) { out.mapping_lease_ = reader.mapping_lease(); }
+    for (const MappedPlacement& placement : plan.mapped_objects) {
+        auto& storage = out.objects_.at(placement.object.index);
+        if (!storage.mapped.empty()) { throw ArtifactError("duplicate mapped placement"); }
+        storage.mapped             = reader.mapped_bytes(placement.object);
+        storage.mapped_file_offset = placement.file_offset;
+        out.stats_.mapped_tensor_bytes = checked_add(
+            out.stats_.mapped_tensor_bytes, storage.mapped.size(), "mapped tensor bytes");
+    }
+    out.stats_.mapped_object_count = plan.mapped_objects.size();
     if (plan.pinned_capacity_bytes > std::numeric_limits<std::size_t>::max()) {
         throw ArtifactError("pinned Host backing exceeds size_t");
     }

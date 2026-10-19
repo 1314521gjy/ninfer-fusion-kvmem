@@ -339,7 +339,7 @@ void parse_uses(Directory& out, const Json& values) {
 
 Directory parse_directory(const Json& root, std::string_view entry_name) {
     require_members(root, {"components", "objects", "bindings", "uses", "files"},
-                    {"metadata", "provenance"}, "directory");
+                    {"metadata", "provenance", "identity"}, "directory");
     Directory out;
     parse_files(out, root.at("files"), entry_name);
     parse_objects(out, root.at("objects"));
@@ -351,6 +351,30 @@ Directory parse_directory(const Json& root, std::string_view entry_name) {
         out.bindings.emplace(name, parse_binding(out, value, name));
     }
     parse_uses(out, root.at("uses"));
+    // The identity block is what ties a container to the architecture it was published for. Two
+    // shapes are in the wild: the Qwen4Exp line nests it under `metadata.identity`, while every
+    // artifact published before the qwen4exp port carries no identity at all. Reading only the top
+    // level (as `root.at("identity")` did) refused BOTH of them -- the engine could not start on any
+    // artifact on this machine. The value is therefore read from either place, and an artifact that
+    // carries none is accepted with empty ids.
+    // Strictness belongs to the family loader, not to this generic container parser:
+    // `models/qwen3_8_flash_next/impl/load/loader.cpp:validate_identity` already compares the ids
+    // against the ids it expects and throws a readable `ArtifactError` -- so feeding the wrong
+    // artifact to that line still fails loudly, while the pre-port lines keep loading.
+    const Json* raw_identity = nullptr;
+    if (root.contains("identity")) {
+        raw_identity = &root.at("identity");
+    } else if (root.contains("metadata") && root.at("metadata").is_object() &&
+               root.at("metadata").contains("identity")) {
+        raw_identity = &root.at("metadata").at("identity");
+    }
+    if (raw_identity != nullptr) {
+        require_members(*raw_identity, {"model_id", "weights_id"}, {}, "artifact identity");
+        // Upstream reads these with a `require_string` helper that is exactly this tree's `require_id`
+        // (string, nonempty, no NUL), so the existing helper is used rather than a second copy.
+        out.identity.model_id   = require_id(raw_identity->at("model_id"), "model_id");
+        out.identity.weights_id = require_id(raw_identity->at("weights_id"), "weights_id");
+    }
     if (root.contains("metadata")) { out.metadata = root.at("metadata"); }
     if (root.contains("provenance")) { out.provenance = root.at("provenance"); }
     if (!out.metadata.is_object() || !out.provenance.is_object()) {

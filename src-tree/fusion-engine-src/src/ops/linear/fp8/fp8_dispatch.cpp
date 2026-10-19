@@ -5,11 +5,13 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 namespace {
 const std::array kShapes{&kFp8N14336K5120, &kFp8N16384K5120, &kFp8N34816K5120,
-                         &kFp8N5120K6144,  &kFp8N5120K17408, &kFp8N248320K5120};
+                         &kFp8N5120K6144,  &kFp8N5120K17408, &kFp8N248320K5120,
+                         &kFp8N13312K2560, &kFp8N16384K2560, &kFp8N2560K6144};
 const std::array kUnifiedShapes{&unified::kFp8N14336K5120, &unified::kFp8N16384K5120,
                                 &unified::kFp8N34816K5120, &unified::kFp8N5120K6144,
                                 &unified::kFp8N5120K17408, &unified::kFp8N248320K5120};
@@ -17,9 +19,21 @@ const std::array kUnifiedShapes{&unified::kFp8N14336K5120, &unified::kFp8N16384K
 const Fp8LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPolicy policy,
                                     LinearRouteTable table) {
     if (!valid_linear_policy(policy)) throw std::invalid_argument("fp8 linear: unsupported policy");
-    for (const auto* shape : table == LinearRouteTable::Unified ? kUnifiedShapes : kShapes)
-        if (shape->n == n && shape->k == k) return *shape;
-    throw std::invalid_argument("fp8 linear: unsupported shape");
+    // Two explicit branches rather than a ternary over the two arrays: they no longer hold the same
+    // number of entries (the standard table carries the three Qwen3.8-Flash-Next geometries, the
+    // unified table does not), so a conditional expression cannot unify their types.
+    if (table == LinearRouteTable::Unified) {
+        for (const auto* shape : kUnifiedShapes)
+            if (shape->n == n && shape->k == k) return *shape;
+    } else {
+        for (const auto* shape : kShapes)
+            if (shape->n == n && shape->k == k) return *shape;
+    }
+    // Name the offending geometry and the table it was looked up in: a bare "unsupported shape" cost
+    // a whole round on 2026-10-11 (docs/20 §16.35), and the two tables hold different sets.
+    throw std::invalid_argument(std::string("fp8 linear: unsupported shape n=") + std::to_string(n) +
+                                " k=" + std::to_string(k) + " table=" +
+                                (table == LinearRouteTable::Unified ? "unified" : "standard"));
 }
 } // namespace
 
