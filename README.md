@@ -4,6 +4,8 @@
 
 本项目基于 NInfer `0.11.0-rtx3090`，发布融合后的源码、复现记录和验证工具。它是 NInfer 的**下游衍生项目**；基座与第三方算法来源见 [署名与改动声明](NOTICE.md)。
 
+> **2026-10-19 更新**：本版已并入 **KV 流式（streaming）机制**与 **Bonsai 27B ternary** 模型线，并给出 sm86 / sm89 / sm120a 三 arch 的实编记录与两套 8 GB 配方 —— 见下方 [本次更新](#本次更新2026-10-19把-streaming-的思路接进-kvmem)。下方其余章节记录的是旧线（PQ2 + dflash2）口径，两者不要混用。
+
 > [!WARNING]
 > 这是初期实验版本，仍有未定位问题，不保证回答正确性与运行稳定性。维护者建议用于个人探索，不建议用于商用；该建议不改变 [Apache-2.0 许可](LICENSE)。使用前请读 [Bug 账本及状态复核](已知问题-初期版本.md)。
 
@@ -22,6 +24,27 @@
 KVMem 环保留常驻窗口，将其他页降到主机层；需要时按内容相关性选页、搬回设备并装配注意力窗口。host-backed 复用与惰性物化让后续轮次可以继续使用主机驻留的检查点。按卡档位则为内核调度选择路由。
 
 **小 KV 池不代表模型权重也能装进小显存**，也不代表检索与完整注意力在任意任务上质量等价。模型权重、运行工作区、投机头、CUDA Graph 和主机内存都需要单独预算。机制、容量公式与负控见 [白皮书](复现白皮书-NInfer-KVMem环-20261002.md) §2–§4。
+
+## 本次更新（2026-10-19）：把 streaming 的思路接进 KVMem
+
+这一版做的是**架构融合**，不是修单个 bug：把流式（streaming）里"缺页可拉回、容量不够时谁让位"的机制接到 KVMem 环上，同时新增 **Bonsai 27B ternary**（`qwen3_5`）这条模型线。
+
+**加了什么**
+
+| 机制 | 做什么 | 解决什么 |
+|---|---|---|
+| 设备环池 + 宿主权威副本 | 设备只留窗口，页降到主机；需要时按内容相关性 H2D 检索回来 | 设备池可以远小于逻辑上下文，而不等于"看不见" |
+| 四桶预算 `protect / skeleton / evidence / recent / free` | 每轮显存按桶分配，恒等式 `sum == pool` 违反即硬抛 | 让位有账、可判据（不是"看起来没崩"） |
+| 头部保护（`protect`） | sink ∪ 头部段常驻，`first_hidden` 可自证 | 检索预算不足时保住题面开头的事实 |
+| 前缀复用（host-backed） | 共享前缀走宿主副本，`cached_tokens` 不回落 | 多轮/换问句不重新 prefill |
+| MTP 投机 | `--spec mtp --draft-tokens 1 --mtp-attention-window 8` | 解码吞吐翻倍级（本机实测 `mtp accepted 77–92%`） |
+| 分段注入网关 | 超池题面按结构单元分片、逐片摘要回注；含 `L2z` 强制重建与 `L3` 可见拒答 | 题面 > 池时**不静默错**：要么分片答对，要么明确拒答 |
+
+**27B ternary 几何**：64 层 = 3×linear_attention + 1×full_attention ⇒ **只有 16 层带 KV**，25,728 B/token；`context_window 262144`。本机（RTX 4080 SUPER / `sm_89`）8 GiB 快档实测 `engine ≈7,365 MiB`、decode 100–275 tok/s、TTFT 10 s 量级（20K 题面）；8 GiB 长档为预测值。
+
+**硬边界（读这一版必须先知道）**：**题面 token > 池 token ⇒ 单请求答案不可信**（引擎会打 `unverified` 告警；"没打警告"不等于安全，见 `src/serve/generation_service.cpp` 的注释）。超池题面必须走分片网关、每片 ≤ 池。分片聚合已实测精确（94K 题面 / 池 32,768 ⇒ `n=3`、`final=3241` = 真值）。
+
+**这一版与下方旧口径的关系**：下方"获取与启动 / 8 GB 档 / 实测结果"记录的是**旧线（PQ2 + dflash2 + `start-8g.bat`）**，仍然有效但**不要与新线配方混用**；新线的两套 8 GB 配方见"当前边界与排错"里新增的小节。
 
 ## 从哪里开始
 
@@ -177,6 +200,23 @@ cmake --build build-89-clean --target ninfer-serve -j 8
 
 产物位于 `build-89-clean\apps\ninfer-serve.exe`。RTX 30 / 50 系分别使用 `86` / `120a`，并各用一个新的构建目录。CMake 还允许 `80`，源码将其标为未实测兼容目标；允许配置不等于已验。
 
+**2026-10-19 的三 arch 实编记录（本机实测，非推断）**
+
+| arch | 覆盖 | 产物 | 目标数 | 实测耗时 | arch 自证 |
+|---|---|---:|---:|---:|---|
+| `86` | RTX 30 系 | 782.2 MiB | 884 | **34.6 min** | `build.ninja` 中 388 处 `compute_86`（无 89/120a） |
+| `89` | RTX 40 系 | 764.2 MiB | — | — | 389 处 `compute_89` |
+| `120a` | RTX 50 系 / RTX PRO 6000 Blackwell | 677.4 MiB | 1,146 | **23.5 min** | 415 处 `compute_120a`（无 86/89）；`NINFER_SM120_NVFP4/FP8` 在场、非 RDC 归档在场、`sm86` stub **0** 个 |
+
+三点踩坑，写在这里省别人时间：
+
+- **`sccache` 不能用作 `CMAKE_CUDA_COMPILER_LAUNCHER`**：会得到 `fatbinary fatal : Could not open input file '<tu>.ptx'`（中间 PTX 在 sccache 沙箱里找不到）。CUDA 编译留空 launcher；C/CXX 可以继续用。
+- **`--split-compile=4` 对单线程 `ptxas` 长尾很有效**：`86` 从历史 122.8 分钟降到 34.6 分钟（`-j 8`）。
+- **单文件多 arch 不可行**：三份合计 2.17 GiB，超 PE 镜像 2 GiB 上限（`LNK1248`）。⇒ 一个分发包内放三份二进制，按算力在启动时选（与上游容器同构）。
+- `120a` 需要 **CUDA ≥ 13.1**：CUDA 12.8/12.9 会错误编译 `sm_120a` kernel，`CMakeLists.txt` 已加硬守卫（`FATAL_ERROR`）。
+
+**硬件支持面（源码口径）**：`80`（GA100，未调优）/ `86` / `89` / `120a` 之外**不在支持面** —— V100（`sm_70`）、Turing（`sm_75`）、H100（`sm_90`）都无法配置：白名单直接拒，且 CUDA 13 已不再提供 `compute_70`。列表外的卡可运行但路由表为空（`Unmeasured`），属"跑得起来、未调优"。
+
 构建注意事项：
 
 - **每个架构使用新的空构建目录**。混用不同时期的对象文件曾导致启动崩溃，见 [0x18c729 根因与修法](根因与修法-0x18c729-20261003.md)。
@@ -202,6 +242,22 @@ cmake --build build-89-clean --target ninfer-serve -j 8
 
 ## 当前边界与排错
 
+### 新的 8 GB 两套配方（27B ternary，2026-10-19）
+
+8 GiB 卡上二选一，**不要混用**（配方与预留都不同）；公共参数：`--max-context 262144 --max-concurrency 1 --derive-session-keys --max-shared-prefixes 0 --prefill-chunk 1024`，env `NINFER_KV_WINDOW=10240 NINFER_KV_RETRIEVE=8192 NINFER_KV_REUSE_HOSTBACKED=1`，**8 GiB 档预留 400 MiB**（判据 `engine ≤ 8192 − 400 − 300`）。
+
+| 档 | 用途 | 关键参数 | 池 / 单问上限 | engine |
+|---|---|---|---:|---:|
+| **长上下文（不开 MTP）** | 单问尽量长 | `--kv-capacity 51200 --kv-dtype rk2v4-e8 --host-kv-mib 2816` | 51,200 | **预测 7,312** |
+| **快档（开 MTP）** | 多轮 / 交互 | `--kv-capacity 12800 --kv-dtype rk2v4-e8 --host-kv-mib 3328 --spec mtp --draft-tokens 1 --mtp-attention-window 8` | 12,800 | **实测 7,365** |
+
+- **`--max-shared-prefixes 0` 必带**：环模式下共享前缀快照会触发 `active KV snapshot page ownership is not ordered` / `full page is not stable` 两条 fast-fail。
+- 超过该档池的题面**必须走分片网关**（每片 ≤ 池）；单请求超池的答案不可信。
+- 显存不够时按这个顺序让位：关外部占卡进程（≈600–1,000 MiB）→ 缩池（每 −64 页 ≈ −53 MiB）→ 关 MTP（≈551–970 MiB）→ `--ngram-draft-tokens 0`（≈50–127 MiB）；**不要**靠调 `--draft-tokens` / `--mtp-attention-window` 省显存（实测差 12 MiB）。
+- 长输出要求 `free ≥ 10 页`，否则会出现内容缺号/回卷（实测池 1,536 破损、1,792 干净）。
+
+> ⚠️ 下面这段是**旧线（PQ2 + dflash2 + `start-8g.bat`）**的 8 GB 口径；**新线以上一小节为准，两套不要混用。**
+>
 > **8 GB 卡请用仓根的 `start-8g.bat`**（8 GB 专属；其他卡不要用）。它把 KV 精度降到 `rk4v4-e8`（每页 64 字 ≈1.10 MiB，bf16 是 4.0 MiB）、用 `NINFER_KV_WINDOW` 定常驻窗口、并让 `--kv-capacity auto` 按窗口定池 —— 实测本机整卡 6.84 GiB（权重 5.52 + 运行 1.32），窗口 65,536 字、逻辑上下文 131,072 字。质量代价按困惑度实测 **+0.30%**。读数与"怎么变红"见 `实测回执与反馈.md` §14。
 >
 > 📄 **发给测试者的口径版提醒：[`8G档-配置提醒-20261008.md`](8G档-配置提醒-20261008.md)**（怎么换件、启动命令、起来后必核的三行、四条别踩、起不来怎么调、该回传什么）。
