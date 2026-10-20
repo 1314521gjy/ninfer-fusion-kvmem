@@ -379,8 +379,10 @@ public:
             physical_predecessor = physical(*preferred_predecessor);
         }
         materialization_scratch_.clear();
-        physical_->materialize(reservation, static_cast<std::uint32_t>(destinations.size()),
-                               materialization_scratch_, physical_predecessor);
+        physical_->materialize(
+            reservation, static_cast<std::uint32_t>(destinations.size()),
+            materialization_scratch_, physical_predecessor, "mapped",
+            [this](const char* tag) { return demote_oldest_to_host(); });
         for (std::size_t offset = 0; offset < destinations.size(); ++offset) {
             const std::uint32_t index = free_[free_count_ - 1U - offset];
             Page& page                = pages_[index];
@@ -546,12 +548,23 @@ public:
             }
         }
         if (!victim.has_value()) { return false; }
-        return drop_device_replica(LogicalKVPageHandle(this, static_cast<std::uint32_t>(*victim),
-                                                       pages_[*victim].generation));
+        const std::uint32_t allocated_before = physical_->allocated_pages();
+        const bool dropped = drop_device_replica(
+            LogicalKVPageHandle(this, static_cast<std::uint32_t>(*victim),
+                                pages_[*victim].generation));
+        if (dropped) {
+            std::fprintf(stderr,
+                         "[kv-evict] page=%d allocated_before=%u allocated_after=%u "
+                         "tag=demote-oldest\n",
+                         static_cast<int>(*victim), allocated_before,
+                         physical_->allocated_pages());
+        }
+        return dropped;
     }
 
     [[nodiscard]] DeviceKVPageHandle reserve_device_replica(LogicalKVPageHandle handle,
-                                                            DeviceKVPageReservation& reservation) {
+                                                            DeviceKVPageReservation& reservation,
+                                                            const std::function<bool(const char*)>& evict = {}) {
         Page& page = require(handle);
         if (page.device_replica || page.pending_device_replica || !page.host_replica ||
             page.destination_pinned || page.source_pins != 0 ||
@@ -564,7 +577,9 @@ public:
         // pool-growth / transfer-booking semantics, not "make room by demoting an old page").
         page.pending_device_replica.emplace(physical_->materialize_one(
             reservation, "host-restore",
-            [this](const char*) { return demote_oldest_to_host(); }));
+            evict ? evict : std::function<bool(const char*)>([this](const char*) {
+                return demote_oldest_to_host();
+            })));
         page.destination_pinned = true;
         return page.pending_device_replica->handle();
     }

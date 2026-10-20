@@ -301,9 +301,13 @@ public:
     void resize_reservation(DeviceKVPageReservation& reservation, std::uint32_t new_reserved_pages);
 
     // Grows destination to target_page_count without host allocation or a second capacity check.
+    // C4 (B37): batch materialization gets the same eviction sink as the single-page form, so a
+    // full pool can demote host-backed pages before the ContextCacheExhausted at cpp:426.
     void materialize(DeviceKVPageReservation& reservation, std::uint32_t target_page_count,
                      std::vector<DeviceKVPageLease>& destination,
-                     std::optional<DeviceKVPageHandle> preferred_predecessor = std::nullopt);
+                     std::optional<DeviceKVPageHandle> preferred_predecessor = std::nullopt,
+                     const char* tag = "batch",
+                     const std::function<bool(const char*)>& evict = {});
     // Single-page forms for fixed-capacity logical stores which do not own a growable lease vector.
     // G2: when the pool has no free run, `evict` is asked to hand a page back (the 27B store demotes
     // its oldest resident page to its host copy). An empty sink, or a sink that cannot free anything,

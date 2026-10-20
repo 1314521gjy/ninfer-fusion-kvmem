@@ -407,7 +407,9 @@ void DeviceKVPagePool::resize_reservation(DeviceKVPageReservation& reservation,
 void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
                                    std::uint32_t target_page_count,
                                    std::vector<DeviceKVPageLease>& destination,
-                                   std::optional<DeviceKVPageHandle> preferred_predecessor) {
+                                   std::optional<DeviceKVPageHandle> preferred_predecessor,
+                                   const char* tag,
+                                   const std::function<bool(const char*)>& evict) {
     static_assert(std::is_nothrow_move_constructible_v<DeviceKVPageLease>);
     if (!reservation.belongs_to(*this) || target_page_count < destination.size()) {
         throw std::invalid_argument("Paged KV materialization has an invalid owner or extent");
@@ -423,6 +425,37 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
         }
     }
     if (count == 0) { return; }
+    // C4 (B37): the batch path used to have no eviction sink at all -- the 155-page host-restore
+    // scene died right here while 534 resident pages (mostly a cached continuation) held the pool.
+    // Evict before the capacity verdict; every successful sink call must actually reduce
+    // allocated_pages_ (otherwise stop: no-progress sinks are the dead-loop risk).
+    const std::uint32_t need_pages = count;
+    std::uint32_t evict_attempts   = 0;
+    std::uint32_t evicted_pages    = 0;
+    const std::uint32_t allocated_before = allocated_pages_;
+    const std::uint32_t kMaxBatchEvictions = std::max<std::uint32_t>(64U, need_pages);
+    if (count > usable_pages() - allocated_pages_ && evict) {
+        while (evict_attempts < kMaxBatchEvictions &&
+               count > usable_pages() - allocated_pages_) {
+            const std::uint32_t before = allocated_pages_;
+            const bool progressed      = evict(tag != nullptr ? tag : "batch");
+            ++evict_attempts;
+            if (!progressed || allocated_pages_ >= before) { break; }
+            evicted_pages += before - allocated_pages_;
+        }
+    }
+    if (count > usable_pages() - allocated_pages_ || evict_attempts != 0) {
+        std::fprintf(stderr,
+                     "[kv-evict] need=%u freed=%u attempts=%u capped=%u page=-1 "
+                     "allocated_before=%u allocated_after=%u decision=%s tag=%s\n",
+                     need_pages, evicted_pages, evict_attempts,
+                     evict_attempts >= kMaxBatchEvictions ? 1U : 0U, allocated_before,
+                     allocated_pages_,
+                     count > usable_pages() - allocated_pages_
+                         ? "exhausted"
+                         : (evicted_pages != 0 ? "evicted" : "room-ok"),
+                     tag != nullptr ? tag : "batch");
+    }
     if (count > usable_pages() - allocated_pages_) {
         // Numbers, not just the verdict: "the pool could not be drained" is only actionable
         // with the counters beside it. Taken from the superseded diagnostic patch
@@ -526,17 +559,33 @@ void DeviceKVPagePool::materialize(DeviceKVPageReservation& reservation,
 DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& reservation,
                                                     const char* tag,
                                                     const std::function<bool(const char*)>& evict) {
+    // C4/S2 (B37): a zero reservation is a consumed LOGICAL permission, not a physical shortage.
+    // Under the ring (allow_logical_reservation=true) grow it by exactly one page here, at the
+    // real materialization point (never during warmup / missing==0 -- that was C2's hang).
+    if (reservation.belongs_to(*this) && reservation.pages_ == 0 &&
+        spec_.allow_logical_reservation) {
+        resize_reservation(reservation, 1);
+        std::fprintf(stderr,
+                     "[kv-slack2] reservation=0 allow_logical=1 tag=%s decision=grow-one\n",
+                     tag != nullptr ? tag : "unnamed");
+    }
     if (!reservation.belongs_to(*this) || reservation.pages_ == 0) {
         throw std::invalid_argument("Paged KV single-page materialization exceeds reservation");
     }
-    // G2: ask the owner to demote a resident page to its host copy before declaring exhaustion.
-    // Small and bounded on purpose: 4 attempts matches kRestoreSlackPages (context.cpp:2447), i.e.
-    // one attempt per page the restore path is allowed to keep in reserve, so a single restore can
-    // never spin here. A sink that frees nothing ends the loop immediately.
-    constexpr int kMaxEvictAttempts = 4;
+    // C4 (B37): ask the owner to demote resident pages until the pool has room. Every successful
+    // sink call must actually reduce allocated_pages_; a no-progress sink stops immediately (the
+    // dead-loop guard). Hard cap 64, independent of pool size (J9/J11).
+    constexpr std::uint32_t kMaxEvictAttempts = 64U;
+    std::uint32_t evict_attempts = 0;
+    std::uint32_t evicted_pages  = 0;
+    const std::uint32_t allocated_before = allocated_pages_;
     if (free_page_runs_.empty() && evict) {
-        for (int attempt = 0; attempt < kMaxEvictAttempts && free_page_runs_.empty(); ++attempt) {
-            if (!evict(tag)) { break; }
+        while (evict_attempts < kMaxEvictAttempts && free_page_runs_.empty()) {
+            const std::uint32_t before = allocated_pages_;
+            const bool progressed      = evict(tag);
+            ++evict_attempts;
+            if (!progressed || allocated_pages_ >= before) { break; }
+            evicted_pages += before - allocated_pages_;
             ++counters.evicted;
         }
         if (!free_page_runs_.empty()) {
@@ -546,6 +595,18 @@ DeviceKVPageLease DeviceKVPagePool::materialize_one(DeviceKVPageReservation& res
                          static_cast<unsigned long long>(counters.evicted),
                          tag != nullptr ? tag : "unnamed");
         }
+    }
+    if (evict_attempts != 0 || free_page_runs_.empty()) {
+        std::fprintf(stderr,
+                     "[kv-evict] need=1 freed=%u attempts=%u capped=%u page=-1 "
+                     "allocated_before=%u allocated_after=%u decision=%s tag=%s\n",
+                     evicted_pages, evict_attempts,
+                     evict_attempts >= kMaxEvictAttempts ? 1U : 0U, allocated_before,
+                     allocated_pages_,
+                     free_page_runs_.empty()
+                         ? "exhausted"
+                         : (evicted_pages != 0 ? "evicted" : "room-ok"),
+                     tag != nullptr ? tag : "unnamed");
     }
     if (free_page_runs_.empty()) {
         ++counters.exhausted;

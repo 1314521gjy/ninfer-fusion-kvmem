@@ -1857,12 +1857,13 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
     if (host_kv_extents == nullptr || target_free == 0) { return 0; }
     std::uint32_t freed = 0;
     std::uint32_t slots_visited = 0, skip_invalid = 0, skip_noresident = 0, skip_pins = 0,
-                  skip_stalehost = 0, skip_partial = 0, skip_duplicate = 0;
+                  skip_stalehost = 0, skip_partial = 0, skip_duplicate = 0, slots_active = 0;
     // LOCAL DIAGNOSTIC (demote-counters): the fourth way to end with freed=0 was invisible. A
     // refused host-arena reservation (HostKVExtentStore full) returns false from flush() without
     // bumping any counter -- and the tail call at the end of this function dropped the return
     // value outright. Counted here so `demote-other short` can name it. Read-only observation.
     std::uint32_t flush_failed = 0;
+    std::uint32_t flush_refused = 0;
     // LOCAL FIX (2026-10-02): a SECOND, distinct refusal reason. `flush_failed` means the Host arena
     // was full; this one means the Host store REFUSED to publish the batch (see the `publish declined`
     // line in host_kv_store.h -- it used to be a silent `std::terminate`). They need different
@@ -1888,8 +1889,28 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
             return false;
         }
         for (const LogicalKVPageHandle logical : batch) {
-            pages.release_active_reference(logical);
-            if (!pages.drop_device_replica(logical)) { return false; }
+            // C4/刀2 (2026-10-21): J3's flush refusal was "every filter passes, drop still false";
+            // after publishing the Host replica, the only guard that can still be false is a
+            // SECOND active reference. Releasing one per attempt can never reach zero, so release
+            // until the count is 0 (hard-capped; a broken count must not spin the engine).
+            constexpr std::uint32_t kMaxActiveReleases = 64U;
+            std::uint32_t releases = 0;
+            while (pages.active_address_references(logical) != 0 &&
+                   releases < kMaxActiveReleases) {
+                pages.release_active_reference(logical);
+                ++releases;
+            }
+            if (!pages.drop_device_replica(logical)) {
+                ++flush_refused;
+                std::fprintf(stderr,
+                             "[kv-drop-refused] logical=%u host_current=%d writer=%u active=%u "
+                             "pins=%u pending=%d destination=%d decision=flush\n",
+                             0, pages.host_replica_current(logical) ? 1 : 0,
+                             static_cast<unsigned>(pages.writer_references(logical)),
+                             pages.active_address_references(logical),
+                             pages.source_pins(logical), -1, -1);
+                return false;
+            }
         }
         freed += static_cast<std::uint32_t>(batch.size());
         batch.clear();
@@ -1897,7 +1918,13 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
     };
     addresses.for_each_address([&](const KVAddressSpaceHandle& handle, bool active,
                                    std::uint32_t mapped) {
-        if (freed >= target_free || active || handle == skip) { return; }
+        // C4/刀1: do NOT short-circuit on `active`. The per-page guards below (source pins,
+        // partial commit, host replica current, and can_drop_device_replica requiring
+        // writer/active refs == 0) already protect live data; `handle == skip` still protects the
+        // CURRENT request's address. Skipping active addresses was the structural reason the 534
+        // resident pages could never be demoted (the owning continuation is active/catalogued).
+        if (freed >= target_free || handle == skip) { return; }
+        if (active) { ++slots_active; }
         ++slots_visited;
         for (std::uint32_t page = 0; page < mapped && freed + batch.size() < target_free; ++page) {
             const LogicalKVPageHandle logical = addresses.logical_page(handle, page);
@@ -1923,7 +1950,17 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
                 if (!pages.host_replica_current(logical)) { ++skip_stalehost; continue; }
                 pages.set_writer(logical, false);
                 pages.release_active_reference(logical);
-                if (pages.drop_device_replica(logical)) { ++freed; }
+                if (pages.drop_device_replica(logical)) {
+                    ++freed;
+                } else if (pages.valid(logical) && pages.device_resident(logical)) {
+                    // C4/刀1 diagnostic: all explicit filters passed, but the final guard refused.
+                    std::fprintf(stderr,
+                                 "[kv-drop-refused] page=%u writer=%u active=%u pins=%u "
+                                 "host_current=%d\n",
+                                 page, static_cast<unsigned>(pages.writer_references(logical)),
+                                 pages.active_address_references(logical), pages.source_pins(logical),
+                                 pages.host_replica_current(logical) ? 1 : 0);
+                }
                 continue;
             }
             // Content not on the Host yet: the extent store pins through `can_pin_source`, which
@@ -1953,11 +1990,12 @@ std::uint32_t ProgramImpl::demote_other_addresses_to_host(KVAddressSpaceStore& a
     // needs to know WHY the dead residents would not drain. Name the blocker.
     if (freed < target_free) {
         std::fprintf(stderr,
-                     "[ninfer] demote-other short: freed=%u want=%u slots=%u invalid=%u "
-                     "noresident=%u pins=%u stalehost=%u partial=%u dup=%u flushfail=%u declined=%u pending=%zu\n",
-                     freed, target_free, slots_visited, skip_invalid, skip_noresident,
-                     skip_pins, skip_stalehost, skip_partial, skip_duplicate, flush_failed,
-                     flush_declined, batch.size());
+                     "[ninfer] demote-other short: freed=%u want=%u slots=%u slots_active=%u "
+                     "invalid=%u noresident=%u pins=%u stalehost=%u partial=%u dup=%u "
+                     "flushfail=%u flushrefused=%u declined=%u pending=%zu\n",
+                     freed, target_free, slots_visited, slots_active, skip_invalid,
+                     skip_noresident, skip_pins, skip_stalehost, skip_partial, skip_duplicate,
+                     flush_failed, flush_refused, flush_declined, batch.size());
     }
     return freed;
 }

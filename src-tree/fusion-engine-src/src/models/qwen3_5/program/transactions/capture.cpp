@@ -652,7 +652,31 @@ ProgramImpl::install_private_capture(SequenceState& sequence, const CaptureGroup
         };
     }
     if (group.long_anchor && context_cache.max_long_anchors_per_continuation.value_or(0) != 0) {
-        const std::size_t capacity_limit = context_cache.max_long_anchors_per_continuation.value();
+        // R-2 (2026-10-20): never CAPTURE a long anchor whose frontier the Device pool cannot
+        // hold. Such an anchor would be selected by the next request only to be declined by the
+        // host-backed gate (pressure.cpp), and -- because the anchor keeps its continuation
+        // referenced/pinned -- the fallback fresh root has no free page to restore into
+        // ("Paged KV pool has no free page for host-restore" -> HTTP 429, process unusable until
+        // restart). Skipping capture keeps the invariant "every catalogued LongAnchor is
+        // retainable" true from the start.
+        const std::uint32_t anchor_pages = kv_pages_for_frontier(group.frontier);
+        const std::uint32_t anchor_usable =
+            text_kv_pages != nullptr ? text_kv_pages->physical_pool().usable_pages() : 0U;
+        // Also skip every anchor of an OVER-POOL request: its continuation cannot be fully
+        // resident, and a catalogued anchor keeps that continuation pinned, so a later root
+        // finds no free page for host-restore. The no-anchor baseline proves such requests are
+        // served (200) once the continuation is evictable again.
+        const std::uint32_t prompt_pages =
+            (text_kv_addresses != nullptr && sequence.kv)
+                ? text_kv_addresses->mapped_pages(sequence.kv->text)
+                : 0U;
+        if (anchor_usable != 0 && (anchor_pages > anchor_usable || prompt_pages > anchor_usable)) {
+            std::fprintf(stderr,
+                         "[anchor-drop] capture frontier=%u pages=%u usable=%u prompt_pages=%u "
+                         "decision=skip-capture\n",
+                         group.frontier, anchor_pages, anchor_usable, prompt_pages);
+            return removed;
+        }        const std::size_t capacity_limit = context_cache.max_long_anchors_per_continuation.value();
         validate_long_anchor_ordinals(sequence.long_anchors, capacity_limit);
         std::uint32_t ordinal = 0;
         if (sequence.long_anchors.size() == capacity_limit) {

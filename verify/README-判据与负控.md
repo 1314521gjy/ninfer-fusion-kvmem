@@ -161,3 +161,58 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
 2. append-only 夹具第二轮仍 `cached = 0` ⇒ 真红：查 `reuse host-backed: on/off`、`NINFER_KV_REUSE_HOSTBACKED`、`NINFER_KV_WINDOW`、`--max-shared-prefixes 0` 是否带，以及 `adopt declined` 行。
 3. 自称 append-only 但上一轮回答没有进入下一轮 `messages` ⇒ 口径不是 append-only，按第 1 条处理（这类夹具会把"题库形状"误判成引擎缺陷）。
 
+## 8. 2026-10-20 新增：ring + `--auto-long-anchors` 超池 429 回归夹具
+
+**脚本**：`verify/repro-ring-longanchor-429.ps1`（绝对路径参数集中在 `param()` 块，默认读本机 build-89 exe 与 `E:\Ternary-Bonsai-2-27B-ninfer-v3.ninfer`）。
+**解决的 bug**：ring 模式（池 534 页 = 34,176 tok < 逻辑 262,144 tok）下开 `--auto-long-anchors --long-anchor-spacing 1024`，
+3/4 段可能 200，但 **5 段与随后的 16.5K 短请求 429**（Device KV 池被 cached continuation 占满，host-restore 无空页）；
+未修版本上这是"引擎进入不可用态、重启才恢复"的复现件。
+**夹具**：每段约 16.5K token（ASCII filler，每段一条 user message），序列 3 → 4 → 5 段 → 同题重发 → **16.5K 短请求**；
+判据 **R1'** 3/4/5 全 200 · **R2'** 无 500 / 无 `retained prefix exceeds its active KV entitlement` · **R3'** 5 段后短请求 200（不重启） · **R4'**（可选）不传 flag 的负控全 200。
+
+**跑法（负控防假绿，必须按顺序）**：
+1. 未修版本先跑：`powershell -NoProfile -ExecutionPolicy Bypass -File verify\repro-ring-longanchor-429.ps1 -Expect unfixed`
+   ⇒ 必须打印 **`RED-EXPECTED: unfixed baseline reproduced`** 并 exit 0；若全 200 则打印 `FALSE-GREEN` 并 exit 2（**脚本本身被证伪**）。
+2. 修复后验收：`… -Expect fixed [-RunNoAnchorNegControl]` ⇒ 全绿 exit 0，否则打印 `RED: fixed expectation not met. R1=… R2=… R3=… R4=…` 并 exit 1。
+3. 脚本只起一个引擎（起前断言无残留 ninfer 进程 + 端口空闲），`finally` 停引擎；**不编译、不改源码**。
+
+**两种 429 怎么区分（排障时必须先看报文）**：
+
+| 报文 | 抛点 | 含义 |
+|---|---|---|
+| `Paged KV pool has no free page for host-restore: usable … allocated … this reservation …` | `src/core/paged_kv_cache.cpp:526-570`（`DeviceKVPagePool::materialize_one`），由 `src/models/qwen3_5/program/storage/kv_store.h:561-568` 的 `reserve_device_replica(..., "host-restore", demote_oldest_to_host)` 调起；`demote_oldest_to_host` 见 `kv_store.h:527-553` | **materialization 阶段的物理页不足**：reservation 已存在（逻辑承诺），实际要落一页时池里没有 free run，且最多 4 次 evict（`demote_oldest_to_host`）都没腾出页。与准入无关。 |
+| `context cache exhausted: an idle Engine found no placement` | `src/runtime/engine/engine_core.h:1943` | **准入/放置阶段**：所有 active lane 都释放不出候选，Engine 在排队/放置层直接判 429。通常伴随 `cumulative_stats_.context_cache_exhausted_requests`，不是 `[diag] materialize-one FAIL`。 |
+
+**怎么变红**：`-Expect unfixed` 却全 200 ⇒ 夹具不再能区分修与未修（假绿脚本，exit 2）；`-Expect fixed` 但 R1'/R3' 任一非 200 ⇒ 修复未达成（exit 1）；running 期间出现残留引擎 / 端口被占 ⇒ 脚本首断言直接抛错，不产生读数。
+
+## 9. 2026-10-21 修复落地：C4 + R-2（实测读数与残留）
+
+**状态**：已修，仓内（8 文件 +353/−29）。下表取自**同一次引擎启动**的夹具运行，日志目录 `E:\视频\_flashnext\experiments\20261020-回执修复\repro-c4h-fixed\`。
+
+| 判据 | 读数 | 结论 |
+|---|---|---|
+| R1' 3/4/5 段 | **200 / 200 / 200**（20.6 / 34.9 / 49.2 s） | 通过 |
+| R1' 同题重发 | 200（51.9 s） | 通过 |
+| R2' 无 500 / 无 `retained prefix exceeds its active KV entitlement` | 日志 0 命中 | 通过 |
+| R3' 5 段后 16.5K 短请求 | **200（9.4 s）**，不重启 | 通过 |
+| R4' 不传 flag 负控 | 3/4/5/同题/短请求全 200（20.4/34.6/48.6/53.2/9.5 s） | 通过 |
+| 总墙钟 | 锚点臂 166.0 s vs 无锚点臂 166.3 s | 通过（≤1.2×） |
+
+**改动**：
+1. `src/core/paged_kv_cache.{h,cpp}`：`materialize()` 增 `tag`/`evict` 形参，容量判定前按需驱逐；`materialize_one()` 把"固定 4 次上限"改成"按需到够（progress 断言 + 硬上限 64）"，并把**许可 0**（逻辑预留用完，`allow_logical_reservation` 下可 resize）与**物理 0**（free run 用完，要驱逐）分开；自证串 `[kv-evict]`。
+2. `src/models/qwen3_5/program/storage/kv_store.h`：落页 sink 可注入；`host-restore` 走 `demote_other_addresses_to_host`（能**造**宿主副本的强 demoter），而不是只搬"本来就有宿主副本"页的 `demote_oldest_to_host`。
+3. `.../storage/context.cpp`：demoter 不再整段跳过 `active` 地址（逐页守卫仍在）；`flush()` 里把 active 引用释放到 0 再 drop，并给静默 false 补 `[kv-drop-refused]` / `flush_refused`。
+4. `.../planning/pressure.cpp`：**超池请求不采纳 continuation**（`skip-adopt-overpool`）；**当下没有足够空页也不采纳**（`skip-adopt-nofree`，条件 `restore_need > usable - allocated`）；采纳成功打 `[anchor-adopt]`。
+5. `.../transactions/capture.cpp`：capture 的 `prompt_pages` 原来恒 0（门形同虚设），改用已确定的映射页数；超池请求的锚点直接 `skip-capture`。
+6. `.../transactions/materialization.cpp`：restore 循环把强 demoter 传下去。
+
+**口径（别当"关功能"读）**：LongAnchor 从"承诺"改成"**尽力而为的缓存**"——只有池当下装得下才采纳/保留；装不下就按 fresh root 正常服务（答案正确、慢一点），**不 500、不 429、不把引擎打死**。
+
+**已知残留（带证据，别当已修）**：
+1. **"采纳 234 页锚点"与"短请求 200"在本夹具里互斥**：5 段跑完 `free=8`，采纳 234 页锚点要 restore 234 页 ⇒ `skip-adopt-nofree` 必然弃采纳。无 nofree 门那版能打 `[anchor-adopt] frontier=14916 pages=234 reuse_pages=234`，但短请求 429。⇒ `[anchor-adopt]` 正控**无法在 R3' 同时成立**；要单独证它，须用"池宽裕时连续两次同前缀"的场景（未做）。
+2. **位精确未验**：本夹具无 greedy 臂，没与基线 `3bd403e748a8bb6dc1b715db72021e46c2febfc3e395f1f2df65460dcf78c7a7` 逐字节比过。
+3. **同页冷却无样本**：本次运行 `[kv-evict]` 178–180 页量级的成功降级未出现（`freed=0 exhausted` ×3），"同页反复降级"没被真实触发过。
+4. `--auto-long-anchors` 在超池请求上**不再带来加速**（它本来就不该被采纳）——设计口径，非缺陷。
+
+**怎么变红**：R1'/R3' 任一非 200 ⇒ 修复未达成；日志出现 `Paged KV pool has no free page for host-restore` ⇒ 回到物理页不足的老路；出现 `skip-adopt-overpool` 而 `prompt_pages=0` ⇒ capture 的 prompt 页数又没填上（门形同虚设）。
+

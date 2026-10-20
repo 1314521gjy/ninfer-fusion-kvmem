@@ -917,8 +917,13 @@ void ProgramImpl::prepare_materialization(MaterializationTransaction& transactio
                     throw std::logic_error("checkpoint KV page has no restorable replica");
                 }
                 const HostKVPageReplica replica = pages.host_replica(logical);
-                const DeviceKVPageHandle destination =
-                    pages.reserve_device_replica(logical, reservation);
+                const DeviceKVPageHandle destination = pages.reserve_device_replica(
+                    logical, reservation, [&](const char*) {
+                        // C4/刀2: the restore path must be able to CREATE host copies (strong
+                        // demoter), not only drop pages that already have one. `address` is the
+                        // current request's address and is passed as `skip`, so live data is safe.
+                        return demote_other_addresses_to_host(addresses, pages, address, 1) > 0;
+                    });
                 restores.push_back(MaterializationTransaction::KVRestorePage{
                     .logical     = logical,
                     .extent      = replica.extent,

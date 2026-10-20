@@ -344,6 +344,58 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_admission(
         }
         shared_state = &shared_prefix_states[ContractAccess::index(*shared_source)];
     }
+    // C4/刀A (2026-10-20): an OVER-POOL request must never adopt a continuation/anchor. Its own
+    // prompt cannot be resident anyway, so adopting turns the ring's wrap into "restore into a
+    // pool with no free page" (429) -- exactly the difference between the anchor arm (429) and the
+    // no-anchor arm (200). Compute from the request's own token count; fall back to fresh root.
+    if ((source_state != nullptr || shared_state != nullptr) && checkpoint.has_value() &&
+        text_kv_pages != nullptr) {
+        const std::uint32_t prompt_pages =
+            kv_pages_for_frontier(static_cast<std::uint32_t>(prompt.token_ids.size()));
+        const std::uint32_t overpool_usable = text_kv_pages->physical_pool().usable_pages();
+        if (overpool_usable != 0 && prompt_pages > overpool_usable) {
+            std::fprintf(stderr,
+                         "[anchor-drop] adopt frontier=%u prompt_pages=%u usable=%u "
+                         "decision=skip-adopt-overpool\n",
+                         checkpoint->frontier, prompt_pages, overpool_usable);
+            return std::nullopt;
+        }
+    }
+    // C4/刀1 (2026-10-21, rebuilt from round 7 without the unsafe anchor release): adoption is a
+    // CACHE HIT, not an obligation. If the literal pages that must be restored exceed the pool's
+    // CURRENT free pages, decline to fresh root. Do NOT estimate reclaimable pages here, and do
+    // NOT release any anchor/StateImage: that release while candidates are still being inspected
+    // was round 7's 4-seg 500. Success path stays byte-identical to round 6.
+    if ((source_state != nullptr || shared_state != nullptr) && checkpoint.has_value() &&
+        text_kv_pages != nullptr && text_kv_addresses != nullptr) {
+        const SequenceKVBundle* gate_kv =
+            source_state != nullptr
+                ? (source_state->kv ? &*source_state->kv : nullptr)
+                : (shared_state->kv ? &*shared_state->kv : nullptr);
+        if (gate_kv != nullptr && text_kv_addresses->valid(gate_kv->text)) {
+            const std::uint32_t mapped = text_kv_addresses->mapped_pages(gate_kv->text);
+            const std::uint32_t limit =
+                std::min(kv_pages_for_frontier(checkpoint->frontier), mapped);
+            std::uint32_t restore_need = 0;
+            for (std::uint32_t page = 0; page < limit; ++page) {
+                const LogicalKVPageHandle logical =
+                    text_kv_addresses->logical_page(gate_kv->text, page);
+                if (!text_kv_pages->device_resident(logical)) { ++restore_need; }
+            }
+            const auto& pool = text_kv_pages->physical_pool();
+            const std::uint32_t free_pages =
+                pool.usable_pages() > pool.allocated_pages()
+                    ? pool.usable_pages() - pool.allocated_pages()
+                    : 0U;
+            if (restore_need > free_pages) {
+                std::fprintf(stderr,
+                             "[anchor-drop] adopt frontier=%u restore_need=%u free=%u usable=%u "
+                             "decision=skip-adopt-nofree\n",
+                             checkpoint->frontier, restore_need, free_pages, pool.usable_pages());
+                return std::nullopt;
+            }
+        }
+    }
     // LOCAL PROTOTYPE (KVMem-style ring): a reuse source with pages demoted to the Host cannot be
     // adopted wholesale -- restoring every Host page at activation would need the whole logical
     // context on the Device, which is exactly what the pool cannot hold. Decline the reuse so the
@@ -371,7 +423,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_admission(
             // change: `HostKVStore::can_release_page_replica` (host_kv_store.h:278-283) already
             // refuses to drop the Host replica of a page whose Device replica is gone while an address
             // still references it.
-            if (!reuse_hostbacked_enabled()) { return std::nullopt; }
+            if (!reuse_hostbacked_enabled()) {
+                std::fprintf(stderr,
+                             "[adopt-gate] need=%u usable=%u lease_growth=%d decision=%s\n",
+                             need, usable, context_cache.kv_lease_growth ? 1 : 0,
+                             "decline-hostbacked-off");
+                return std::nullopt;
+            }
             const SequenceKVBundle* source_kv =
                 source_state != nullptr
                     ? (source_state->kv ? &*source_state->kv : nullptr)
@@ -406,17 +464,112 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_admission(
                              "usable=%u host_backed=%u unrecoverable=%u first=%u last=%u\n",
                              checkpoint->frontier, need, usable, host_backed, unrecoverable,
                              first_unrecoverable, last_unrecoverable);
+                std::fprintf(stderr,
+                             "[adopt-gate] need=%u usable=%u lease_growth=%d decision=%s\n",
+                             need, usable, context_cache.kv_lease_growth ? 1 : 0,
+                             "decline-recoverable");
+                return std::nullopt;
+            }
+            // CONSISTENCY GATE (2026-10-20, P1 `--auto-long-anchors`): the host-backed allowance
+            // above is only sound for a source the plan CONSUMES into the active sequence. A
+            // RETAIN plan (private LongAnchor, shared prefix, or must_retain_private_source) later
+            // compares its reuse_base pages against `active.main_kv_pages`, and ring mode caps the
+            // Device entitlement at `usable_pages()` (request_plan.cpp: `device_text_cap =
+            // usable_pages()` in the ring_active branch). Admitting `need > usable` there therefore
+            // cannot succeed -- it throws "retained prefix exceeds its active KV entitlement"
+            // (request_plan.cpp:1005-1007) and, worse, leaves the oversized anchor as a candidate
+            // that every later request selects again (the observed stickiness). Decline before
+            // inspect_lane instead: the two decisions then cannot disagree, and the planner falls
+            // back to a fresh root.
+            //
+            // This is deliberately NOT conditioned on --kv-lease-growth: the cap is on the ADMISSION
+            // entitlement (min(entitlement, usable_pages)), so growth cannot lift it above usable_pages()
+            // either. Growth only extends the lease during decode (context.cpp:2245+), after admission.
+            const bool retain_path =
+                shared_state != nullptr || must_retain_private_source ||
+                checkpoint->kind == runtime::CheckpointKind::LongAnchor;
+            if (retain_path) {
+                // R-2 (2026-10-20): do not leave an oversized LongAnchor in the continuation. The
+                // gate below stops the throw, but a catalogued anchor keeps the continuation
+                // referenced and its pages pinned, so the fallback fresh root cannot find a free
+                // page for host-restore (429). Drop this anchor (and its StateImage reference) so
+                // the device pool can recover without restarting the engine.
+                if (source != nullptr) {
+                    SequenceState& mutable_source =
+                        continuation_states[ContractAccess::index(*source)];
+                    const auto anchor = std::find_if(
+                        mutable_source.long_anchors.begin(), mutable_source.long_anchors.end(),
+                        [&](const LongAnchorCheckpoint& candidate) {
+                            return candidate.frontier == checkpoint->frontier &&
+                                   candidate.ordinal == checkpoint->ordinal;
+                        });
+                    if (anchor != mutable_source.long_anchors.end()) {
+                        const std::uint32_t dropped_pages =
+                            kv_pages_for_frontier(anchor->frontier);
+                        std::fprintf(stderr,
+                                     "[anchor-drop] frontier=%u pages=%u usable=%u "
+                                     "decision=drop-on-adopt\n",
+                                     anchor->frontier, dropped_pages, usable);
+                        (void)release_checkpoint_reference(anchor->state);
+                        mutable_source.long_anchors.erase(anchor);
+                    }
+                    // C4/刀3: after dropping the oversized anchor, try the next LongAnchor that
+                    // the pool CAN hold (largest frontier <= usable) instead of falling straight
+                    // back to a fresh root. This is what lets the 466-page anchor be the positive
+                    // control (J12) once the 700-page one is skipped.
+                    if (checkpoint->kind == runtime::CheckpointKind::LongAnchor) {
+                        std::optional<runtime::CheckpointRef> next;
+                        std::uint32_t next_frontier = 0;
+                        for (const LongAnchorCheckpoint& candidate : mutable_source.long_anchors) {
+                            const std::uint32_t candidate_pages =
+                                kv_pages_for_frontier(candidate.frontier);
+                            if (candidate_pages > usable) { continue; }
+                            if (!next || candidate.frontier > next_frontier) {
+                                next_frontier = candidate.frontier;
+                                next          = runtime::CheckpointRef{
+                                    runtime::CheckpointKind::LongAnchor, candidate.frontier,
+                                    candidate.ordinal};
+                            }
+                        }
+                        if (next) {
+                            return inspect_admission(prompt, base, destination, source,
+                                                     shared_source, next,
+                                                     must_retain_private_source);
+                        }
+                    }
+                }
+                std::fprintf(stderr,
+                             "[ninfer] adopt declined (lease gate): frontier=%u need=%u usable=%u "
+                             "lease_growth=%d retain_path=1\n",
+                             checkpoint->frontier, need, usable,
+                             context_cache.kv_lease_growth ? 1 : 0);
+                std::fprintf(stderr,
+                             "[adopt-gate] need=%u usable=%u lease_growth=%d decision=%s\n",
+                             need, usable, context_cache.kv_lease_growth ? 1 : 0,
+                             "decline-retain");
                 return std::nullopt;
             }
             std::fprintf(stderr,
                          "[ninfer] adopt host-backed: frontier=%u need=%u usable=%u host_backed=%u\n",
                          checkpoint->frontier, need, usable, host_backed);
+            std::fprintf(stderr,
+                         "[adopt-gate] need=%u usable=%u lease_growth=%d decision=%s\n",
+                         need, usable, context_cache.kv_lease_growth ? 1 : 0, "adopt");
         }
     }
 
     std::optional<AdmissionCandidate> plan = inspect_lane(
         lane, prompt, base, source_state, shared_state, checkpoint, must_retain_private_source);
     if (!plan) { return std::nullopt; }
+    if (checkpoint.has_value() && text_kv_pages != nullptr) {
+        const std::uint32_t adopted_pages = kv_pages_for_frontier(checkpoint->frontier);
+        const std::uint32_t adopted_usable = text_kv_pages->physical_pool().usable_pages();
+        const std::uint32_t reuse_pages =
+            kv_pages_for_frontier(plan->summary().reusable_prompt_tokens);
+        std::fprintf(stderr,
+                     "[anchor-adopt] frontier=%u pages=%u usable=%u reuse_pages=%u\n",
+                     checkpoint->frontier, adopted_pages, adopted_usable, reuse_pages);
+    }
     plan->impl_->destination       = destination;
     plan->impl_->destination_epoch = lane_epochs[lane];
     plan->impl_->has_source        = source != nullptr;
