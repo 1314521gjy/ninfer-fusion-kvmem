@@ -177,6 +177,26 @@ $response.choices[0].message.content
 
 实测（本机 RTX 4080 SUPER、`--greedy`）：预算 1500 把 `reasoning_tokens` 从 2699 压到 1525、用时 52.7 s → 29.9 s；惩罚 +2.0 把思考的 8-gram 复读率从 0.2695 降到 0.1922（等长前缀口径），而**正文通道逐字不变**。读数、口径与"怎么变红"见 [实测回执与反馈.md](实测回执与反馈.md) §9。
 
+## 旧参数 → 新参数对照（从 KVMem 分支迁移必读）
+
+`--kvmem-*` 是 KVMem 分支的开关，**在本仓新主线里不存在**：本仓 CLI 选项表（`src-tree/fusion-engine-src/src/serve/serve_options.cpp`、`apps/cli/options.cpp` 及其头文件）对 `--kvmem-` 命中 **0**；全仓其余命中只出现在历史回执/源码注释/负控脚本里（`verify/verify-b01-overpool-429.ps1:113` 也记录了同一实测）。新线对应关系如下（**表里每个"新参数名"都已 grep 过仓内存在**，命中数见本节末尾）：
+
+| 旧（KVMem 分支，本仓 CLI 不认） | 新（本仓主线） | 说明 |
+|---|---|---|
+| `--kvmem-budget` | `--kv-capacity` | 设备 KV 池 token 数（页 = 64 tok，`src-tree/fusion-engine-src/src/core/paged_kv_cache.h:21`） |
+| `--kvmem-host-mib` | `--host-kv-mib` | 主机 KV 预算（MiB）。环模式下必须满足 `host_pages + pool_pages ≥ logical_pages`，否则**启动即拒**（`src-tree/fusion-engine-src/src/models/qwen3_5/program/planning/startup.cpp:1806-1840`） |
+| `--kvmem-sink-tokens` / `--kvmem-sink-blocks` | `NINFER_KV_SINK` | 以 token 计；除以 64 向下取整（见 `serve_options.cpp` 的 `--host-kv-mib` 段与 sink 守卫） |
+| `--kvmem-method` / `--kvmem-retrieval-method` | `NINFER_KV_RETRIEVE` | 每轮从 Host 取回的检索预算（token；页 = tok/64） |
+| `--kvmem-gen-reserve` / `--kvmem-gen-budget` | （无同名替代） | 新线用显式 `--kv-capacity` + 环 + Host 层；没有单独的"生成预留"开关 |
+| `--kvmem-sessions` | `--max-concurrency` | 新线当前只支持 1（环启动守卫） |
+| `--kvmem-block-tokens` / `--kvmem-recent-blocks` / `--kvmem-subblocks` / `--kvmem-subblock-reduce` / `--kvmem-deltanet-*` / `--kvmem-nvme-*` | （无同名替代） | 新线页固定 64 tok；磁盘层用 `--disk-kv-path`，没有 deltanet/nvme 开关 |
+| `NINFER_KV_RING=1`（历史开关） | `NINFER_KV_WINDOW` | 新件**不再读取** `NINFER_KV_RING`；环的门是 `NINFER_KV_WINDOW`（B30：只设旧 RING ⇒ CLI 放行 + 引擎 FATAL；只设 WINDOW ⇒ CLI 拒绝） |
+| —（新增） | `NINFER_HOST_PAGEABLE=1` | 允许 Host 页可换入/出 |
+| —（新增） | `NINFER_KV_REUSE_HOSTBACKED=1` | host-backed 复用门；不开则 `adopt declined` 整条拒 |
+| —（新增，**环模式必带**） | `--max-shared-prefixes 0` | 共享前缀快照会触发 `active KV snapshot page ownership is not ordered` / `full page is not stable` 的 fast-fail（`kv_store.h:1544` / `:1540`） |
+
+> 2026-10-20 自查口径（全仓 `*.md/*.py/*.ps1/*.bat/*.txt/*.h/*.hpp/*.cpp/*.cc`）：`NINFER_KV_WINDOW` 128 命中 / 44 文件 · `NINFER_KV_RETRIEVE` 73 / 34 · `NINFER_HOST_PAGEABLE` 37 / 30 · `NINFER_KV_REUSE_HOSTBACKED` 44 / 34 · `--host-kv-mib` 150 / 55 · `--kv-capacity` 348 / 108 · `--max-shared-prefixes` 94 / 33 · `--max-concurrency` 233 / 83 · `NINFER_KV_SINK` 39 / 14 · `--disk-kv-path` 29 / 9；`active KV snapshot page ownership is not ordered` 5 / 5；`--kvmem-` 在 CLI 选项表 0、全仓 42（均为历史文本/注释/负控脚本）。
+
 ## 怎么确认 KVMem 与复用在工作
 
 短问答成功后，再做长上下文测试；“服务能回答”与“超池检索正确”是两项验收。

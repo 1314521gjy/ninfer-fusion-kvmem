@@ -137,3 +137,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify\verify-kit-manifest
   在 **§9**（S2 的口径 = 同题面 × 每臂 3 次 × 同一引擎实例，统计量 = 思考文本 8-gram 复读率 `dup8`，**跨臂比较必须等长前缀**）；
   B24「轮级空响应」的复现与缓解在 **§10**（判据看 `content` 是否为空，**不能只看 `finish_reason`**）。
   本节只记"怎么跑"，不复制那里的数字。
+
+## 7. 2026-10-20 新增：缓存复用类断言必须用 **append-only 夹具**（外部实测回执 §6.1）
+
+> 来源：外部 RTX 5080 16 GB 实测回执（2026-10-20）§6.1。**本节只新增规则，不改 §1–§6 原文。**
+
+**规则（硬）**：凡断言 `cached_tokens > 0`、或者断言"前缀复用生效"，**夹具必须是 append-only 增长会话** ——
+每轮 `messages` = **上一轮全部 messages + 上一轮回答 + 新内容**；不许每轮重写/重排提问，也不许单条 user 拼全文后反复问。
+
+同机、同件、只改夹具形状（**外部实测 2026-10-20 / RTX 5080 16 GB**，表内数字原样引自该回执）：
+
+| 夹具 | 题面 token | 第二轮 cached |
+|---|---:|---:|
+| 单条 user 拼全文 | 38,589 | **0%** |
+| 多轮 messages，但每轮末尾都重写提问（前缀分叉） | 49,640 | **0%** |
+| append-only（上轮全部 + 上轮回答 + 新内容） | 49,640 | **66.7%**（后续 83.3%） |
+
+**判据（正控）**：同一引擎/同一池/同一题面下，append-only 夹具第二轮 `cached > 0`，且 `cached / prompt` 与上一轮输出规模相称；
+环 + host 构型下同时要求 `adopt declined = 0`（引擎日志行）。
+
+**怎么变红**：
+1. 用非 append-only 夹具（每轮重写提问/单条拼全文）却断言"引擎不复用" ⇒ **假阴性，判据无效**；先换 append-only 夹具重跑，再下结论。
+2. append-only 夹具第二轮仍 `cached = 0` ⇒ 真红：查 `reuse host-backed: on/off`、`NINFER_KV_REUSE_HOSTBACKED`、`NINFER_KV_WINDOW`、`--max-shared-prefixes 0` 是否带，以及 `adopt declined` 行。
+3. 自称 append-only 但上一轮回答没有进入下一轮 `messages` ⇒ 口径不是 append-only，按第 1 条处理（这类夹具会把"题库形状"误判成引擎缺陷）。
+
