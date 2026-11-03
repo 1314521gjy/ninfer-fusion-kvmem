@@ -3,13 +3,12 @@
 
 Standard library only. Local server reached with an empty ProxyHandler (this machine has a proxy).
 
-Splitting (2026-10-19, final): capacity-based shard count + cumulative-estimate boundaries.
-  * hard ceiling = P (the pool size): every shard must be fully visible;
-  * n = max(1, ceil(C_true / (0.98*P - L_max))): 0.98P absorbs estimate error (measured: est is
-    0.27% LOW vs prompt_tokens), L_max absorbs line quantisation;
-  * boundaries at argmin |cum(tokens) - i*C/n|, so the worst shard is ~C/n + L_max, bounded;
-  * if anything still exceeds P, bump n and retry (max 5), and ASSERT max_est <= P;
-  * a single line larger than P is split explicitly (warn oversize_line + unit_split=1).
+Splitting: pack complete paragraphs (or lines when there are no blank-line separators).
+  * material-estimate ceiling = min(pool_tokens, max_shard_tokens);
+  * re-estimate joined units, including separator bytes, before extending a shard;
+  * a unit above this ceiling is marked broken, and run() refuses before any HTTP call;
+  * this estimated material budget excludes the question, prompt wrapper and generated output;
+    it is not a guarantee about the engine's tokenizer or complete request KV usage.
 """
 
 from __future__ import annotations
@@ -54,7 +53,8 @@ LAST_PACK_STATS = {"units_total": 0, "units_cut": 0, "pack_mode": "line"}
 def split_equal_lines(text, pool_tokens, factor, safety, max_shard_tokens=32768):
     """Pack by STRUCTURAL UNITS (paragraphs separated by blank lines; else single lines).
 
-    A boundary never splits a unit unless that unit alone is larger than the pool (then it is cut and
+    The material budget is min(pool_tokens, max_shard_tokens). A boundary never splits a unit
+    unless that unit alone exceeds this budget (then it is cut and
     flagged unit_split=1 so downstream knows the shard's count can only be approximate). Shards are
     grown by re-estimating the JOINED text, so the estimate covers the newline bytes too.
     """
@@ -73,7 +73,7 @@ def split_equal_lines(text, pool_tokens, factor, safety, max_shard_tokens=32768)
     cur, cur_est = [], 0
     for unit in units:
         est = estimate_tokens(unit, factor)
-        if est > pool_tokens:
+        if est > cap:
             if cur:
                 shards.append(sep.join(cur)); unit_split.append(0); cur, cur_est = [], 0
             step = max(1, int(len(unit) * cap / est))
@@ -85,7 +85,7 @@ def split_equal_lines(text, pool_tokens, factor, safety, max_shard_tokens=32768)
             continue
         if cur:
             joined = sep.join(cur + [unit])
-            if estimate_tokens(joined, factor) > pool_tokens:
+            if estimate_tokens(joined, factor) > cap:
                 shards.append(sep.join(cur)); unit_split.append(0); cur, cur_est = [], 0
         cur.append(unit); cur_est += est
     if cur:
@@ -93,8 +93,9 @@ def split_equal_lines(text, pool_tokens, factor, safety, max_shard_tokens=32768)
     ceiling = int(pool_tokens * safety)
     for index, shard in enumerate(shards, start=1):
         est = estimate_tokens(shard, factor)
-        if est > pool_tokens:
-            raise AssertionError("shard exceeds the pool: a partially visible shard must never be sent")
+        # Cut units are never sent: run() returns unit_broken before any HTTP call.
+        if est > cap and not unit_split[index - 1]:
+            raise AssertionError("shard exceeds its material budget: an oversized shard must never be sent")
         if est > ceiling:
             util = int(100 * est / max(1, pool_tokens))
             warnings.append("[gate] warn shard_util=%d%% shard=%d/%d est=%d P=%d safety=%s"
@@ -151,11 +152,11 @@ class ChatClient:
 
 
 def unit_broken_payload(tier, n, pool_tokens, context_tokens, ratio, factor):
-    """(a) HONEST REFUSAL: a structural unit larger than the pool makes count aggregation
+    """(a) HONEST REFUSAL: a structural unit larger than the shard budget makes count aggregation
     unbounded, so never claim local_sum and never fall back to model reduce."""
     return {
         "tier": tier, "n": n, "shards": [],
-        "final": "[REFUSED] material unit larger than pool",
+        "final": "[REFUSED] material unit larger than shard capacity",
         "low_confidence": True, "sum_method": "unit_broken",
         "est_factor": factor, "context_tokens_est": context_tokens,
         "pool_tokens": pool_tokens, "ratio": round(ratio, 4),
@@ -196,7 +197,8 @@ def run(args, client) -> dict:
         print("[gate] reduce sum_method=unit_broken final=%r" % result["final"])
         return result
 
-    if args.mode == "locating" and (tier == "T0" or n <= 1):
+    if (args.mode == "locating" and n <= 1 and
+            context_tokens <= min(pool, args.max_shard_tokens or 32768)):
         answer = client.ask(material + "\n\n" + args.question)
         print(f"[gate] single-request answer={answer!r}")
         return {"tier": "T0", "n": 1, "shards": [], "final": answer, "low_confidence": False}
@@ -295,7 +297,7 @@ def selftest() -> int:
     ok_d4 = LAST_PACK_STATS["units_cut"] > 0 and any("oversize_line" in w for w in ub_warn)
     ub_payload = unit_broken_payload("T2", ub_n, 16384, 40000, 0.4, 0.90)
     ok_d4 = ok_d4 and ub_payload["sum_method"] == "unit_broken" and \
-        ub_payload["final"] == "[REFUSED] material unit larger than pool" and \
+        ub_payload["final"] == "[REFUSED] material unit larger than shard capacity" and \
         ub_payload["low_confidence"] is True
     print(f"[gate] selftest (d4) unit_broken units_cut={LAST_PACK_STATS['units_cut']} "
           f"n={ub_n} refuse_expected=True -> {ok_d4}")
@@ -316,9 +318,10 @@ def main(argv) -> int:
     parser.add_argument("--pool-tokens", type=int)
     parser.add_argument("--shard-safety", type=float, default=0.8,
                         help="ADVISORY: shards above this fraction of the pool log a warning; "
-                             "the hard ceiling is the pool itself")
+                             "the material ceiling is min(pool, max-shard-tokens)")
     parser.add_argument("--max-shard-tokens", type=int, default=32768,
-                        help="cap on one shard; default 32768 so a shard stays within one structural unit")
+                        help="estimated material-token cap per shard (also limited by --pool-tokens); "
+                             "excludes question/prompt overhead; oversize units are refused")
     parser.add_argument("--est-factor", type=float, default=0.90,
                         help="scale on bytes/4 (default 0.90, calibrated on 94K)")
     parser.add_argument("--mode", choices=["locating", "aggregate"], default="aggregate")
