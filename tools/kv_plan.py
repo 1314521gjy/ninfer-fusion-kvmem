@@ -74,10 +74,17 @@ def plan(vram_gib: int, quant: str, context: int, desktop_mib: float = DESKTOP_M
 
     # Measured anchor (A): PTQ1 / 8 GiB / 262,144 tokens, desktop 300, reserve 500
     # => rk2v4-e8, pool 824 pages (52,736 tokens), host 2,816 MiB.
-    if (vram_gib, quant, context) == (8, "ptq1", 262_144) and abs(desktop_mib - 300) < 1:
+    anchor_engine = 6_703.0 + 824 * 0.8357
+    if (vram_gib, quant, context) == (8, "ptq1", 262_144) and abs(desktop_mib - 300) < 1 \
+            and anchor_engine <= budget:
+        if host_offer_mib and host_offer_mib < 2_816:
+            return {"ok": False,
+                    "why": f"--host-kv-mib {int(host_offer_mib)} is below the guard: needs at least "
+                           "2816 MiB for pool 824 pages",
+                    "grade": "A(arithmetic)"}
         return {"ok": True, "mode": "ring", "dtype": "rk2v4-e8", "kv_capacity": 52_736,
                 "pool_pages": 824, "host_kv_mib": 2_816, "host_kv_min_mib": 2_816.0,
-                "max_context": 262_144, "engine_mib": 6_703.0 + 824 * 0.8357,
+                "max_context": 262_144, "engine_mib": anchor_engine,
                 "desktop_mib": desktop_mib, "reserve_mib": reserve_mib,
                 "grade": "A (measured anchor)"}
 
